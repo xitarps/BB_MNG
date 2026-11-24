@@ -36,6 +36,7 @@ export function renderSettings(state) {
         <button type="button" class="ghost" data-action="test-connection">Testar conexão</button>
         <button type="button" class="danger" data-action="forget-token">Esquecer token</button>
         <button type="button" class="ghost" data-action="clear-cache">Limpar cache dos dados</button>
+        <button type="button" class="ghost" data-action="download-bitbucket-context">Baixar JSON do Bitbucket</button>
       </div>
       <p class="help wide">Access token de workspace usa o modo Access token (Bearer). A requisição manda esse esquema e prova o token em /2.0/repositories/{workspace}. Esse token normalmente não responde /2.0/user — isso não invalida o token. O menu escolhido é o esquema enviado; esse modo não é trocado por Basic. API token e app password usam Basic.</p>
       <p class="help wide">Esquema ativo: ${config.authMode === "bearer" ? "Bearer" : "Basic"}.</p>
@@ -44,7 +45,7 @@ export function renderSettings(state) {
     </form>
     <form class="card form" data-action="save-claude" autocomplete="off">
       <h2 class="wide">IA pessoal · Claude</h2>
-      <p class="help wide">A chave fica no localStorage deste navegador, acessível a scripts desta origem. Use apenas um computador confiável. As conversas são enviadas diretamente à Anthropic e podem gerar cobrança; não inclua dados privados ou credenciais. O Claude não recebe dados automáticos do Bitbucket ou Jira.</p>
+      <p class="help wide">A chave fica no localStorage deste navegador, acessível a scripts desta origem. Use apenas um computador confiável. As conversas são enviadas diretamente à Anthropic e podem gerar cobrança; não inclua credenciais. O Claude só recebe dados do Bitbucket quando você liga "Anexar contexto do Bitbucket" no chat e envia a mensagem; você escolhe, campo a campo, o que anexar antes do envio.</p>
       <label class="field wide"><span>Chave de API ${state.claude.apiKey ? "— já salva; preencha apenas para substituir" : ""}</span>
         <input name="apiKey" type="password" placeholder="${state.claude.apiKey ? "chave armazenada neste navegador" : "chave da API Anthropic"}" autocomplete="off" spellcheck="false">
       </label>

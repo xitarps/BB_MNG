@@ -2,9 +2,11 @@ import { destinationFor, normalizeWorkspace, validateConfig, clampInt, cleanToke
 import { explainError, createClient, slimPullRequest } from "../models/bitbucket.js";
 import { buildClonePlan } from "../models/clone-script.js";
 import { buildUpdatePlan } from "../models/update-script.js";
-import { DEFAULT_CLAUDE_MODEL, loadClaudeConfig, saveClaudeConfig, sendClaudeMessage } from "../models/claude.js";
+import { DEFAULT_CLAUDE_MODEL, MAX_CONTEXT_CHARS, loadClaudeConfig, saveClaudeConfig, sendClaudeMessage } from "../models/claude.js";
+import { buildBitbucketContext } from "../models/bitbucket-context.js";
+import { buildContextTree, findNode, leavesOf, selectedContextText } from "../models/context-tree.js";
 import { filterRepos } from "../models/metrics.js";
-import { clearSnapshot, forgetToken, loadConfig, loadSnapshot, loadWorkspaces, saveConfig } from "../models/storage.js";
+import { clearSnapshot, forgetToken, loadBitbucketContext, loadConfig, loadContextExcluded, loadSnapshot, loadWorkspaces, saveConfig, saveContextExcluded } from "../models/storage.js";
 import { formatDate } from "../models/format.js";
 import { renderShell } from "../views/shell.js";
 import { renderDashboard } from "../views/dashboard.js";
@@ -49,7 +51,7 @@ const state = {
   notice: "",
   abort: null,
   claude: claudeConfig,
-  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false },
+  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(loadContextExcluded()), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false },
   ui: {
     prQuery: "",
     prAuthor: "",
@@ -80,11 +82,13 @@ else if (!state.config.token) state.route = "settings";
 function render({ keepScroll = false } = {}) {
   const content = document.querySelector(".content");
   const y = keepScroll ? content?.scrollTop || 0 : 0;
-  const chatInput = document.activeElement?.id === "chat-draft" ? document.activeElement : null;
-  const selection = chatInput ? [chatInput.selectionStart, chatInput.selectionEnd] : null;
+  const focusId = /^(chat-draft|chat-context-toggle|chat-maximize|ctx-.*)$/.test(document.activeElement?.id || "") ? document.activeElement.id : "";
+  const focused = focusId ? document.activeElement : null;
+  const selection = typeof focused?.selectionStart === "number" ? [focused.selectionStart, focused.selectionEnd] : null;
   const chatLog = document.querySelector(".chat-messages");
   const chatScroll = chatLog?.scrollTop || 0;
   const wasAtBottom = !chatLog || chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 30;
+  const treeScroll = document.querySelector(".chat-context-tree")?.scrollTop || 0;
   const page = pages[state.route] || renderDashboard;
   const root = document.getElementById("app");
   root.classList.remove("boot");
@@ -93,10 +97,13 @@ function render({ keepScroll = false } = {}) {
   if (next) next.scrollTop = y;
   const nextLog = document.querySelector(".chat-messages");
   if (nextLog) nextLog.scrollTop = wasAtBottom ? nextLog.scrollHeight : chatScroll;
-  const nextInput = document.getElementById("chat-draft");
-  if (selection && nextInput && !nextInput.disabled) {
-    nextInput.focus();
-    nextInput.setSelectionRange(...selection);
+  const nextTree = document.querySelector(".chat-context-tree");
+  if (nextTree) nextTree.scrollTop = treeScroll;
+  for (const box of document.querySelectorAll("input[data-indeterminate]")) box.indeterminate = true;
+  const nextFocus = focusId ? document.getElementById(focusId) : null;
+  if (nextFocus && !nextFocus.disabled) {
+    nextFocus.focus();
+    if (selection) nextFocus.setSelectionRange(...selection);
   }
   ensureReviewers();
 }
@@ -250,21 +257,64 @@ function currentRepoPlan() {
   return build(cloneSelection(state), state.config);
 }
 
+function bitbucketContextData() {
+  const stored = loadBitbucketContext();
+  if (stored) {
+    try {
+      return JSON.parse(stored);
+    } catch {
+      // A corrupted copy falls back to rebuilding from the cached snapshot.
+    }
+  }
+  return buildBitbucketContext(state.snapshot);
+}
+
+function chatContextText() {
+  return selectedContextText(state.chat.contextData, state.chat.contextExcluded);
+}
+
+function setContextLeaves(paths, selected) {
+  const excluded = state.chat.contextExcluded;
+  for (const path of paths) {
+    if (selected) excluded.delete(path);
+    else excluded.add(path);
+  }
+  saveContextExcluded([...excluded]);
+}
+
+function contextLeaves(path) {
+  const tree = buildContextTree(state.chat.contextData);
+  if (path === undefined) return tree.flatMap(leavesOf);
+  const node = findNode(tree, path);
+  return node ? leavesOf(node) : [];
+}
+
 async function sendChat() {
   const chat = state.chat;
   if (chat.sending) return;
   const text = chat.draft.trim();
+  const context = chat.useContext ? chatContextText() : "";
   if (!text) {
     chat.error = "Escreva uma mensagem antes de enviar.";
     render({ keepScroll: true });
     return;
   }
-  if ([state.config.token, state.claude.apiKey].some((secret) => secret && text.includes(secret))) {
-    chat.error = "A mensagem contém uma credencial configurada. Remova-a antes de enviar.";
+  if (chat.useContext && !context) {
+    chat.error = "Não há contexto do Bitbucket selecionado. Marque campos, atualize o painel ou desligue o switch.";
     render({ keepScroll: true });
     return;
   }
-  chat.messages.push({ role: "user", content: text });
+  if (context.length > MAX_CONTEXT_CHARS) {
+    chat.error = `O contexto passa de ${MAX_CONTEXT_CHARS.toLocaleString("pt-BR")} caracteres. Desmarque campos para reduzi-lo.`;
+    render({ keepScroll: true });
+    return;
+  }
+  if ([state.config.token, state.claude.apiKey].some((secret) => secret && (text.includes(secret) || context.includes(secret)))) {
+    chat.error = "A mensagem ou o contexto contém uma credencial configurada. Remova-a antes de enviar.";
+    render({ keepScroll: true });
+    return;
+  }
+  chat.messages.push(context ? { role: "user", content: text, context } : { role: "user", content: text });
   chat.draft = "";
   chat.error = "";
   chat.truncated = false;
@@ -274,6 +324,8 @@ async function sendChat() {
     const result = await sendClaudeMessage(state.claude, chat.messages);
     chat.messages.push({ role: "assistant", content: result.text });
     chat.truncated = result.truncated;
+    // The attached context stays in the conversation, so the switch resets to avoid resending it by accident.
+    if (context) chat.useContext = false;
   } catch (error) {
     chat.messages.pop();
     chat.draft = text;
@@ -333,6 +385,37 @@ document.body.addEventListener("click", (event) => {
     render({ keepScroll: true });
     if (state.chat.open) document.getElementById("chat-draft")?.focus();
     else document.querySelector("[data-action='open-chat']")?.focus();
+  } else if (action === "toggle-chat-maximize") {
+    state.chat.maximized = !state.chat.maximized;
+    render({ keepScroll: true });
+  } else if (action === "toggle-context-panel") {
+    state.chat.contextCollapsed = !state.chat.contextCollapsed;
+    render({ keepScroll: true });
+  } else if (action === "reload-chat-context") {
+    if (state.chat.sending) return;
+    state.chat.contextData = bitbucketContextData();
+    state.chat.error = "";
+    render({ keepScroll: true });
+  } else if (action === "ctx-expand") {
+    const open = state.chat.treeOpen;
+    if (open.has(source.dataset.path)) open.delete(source.dataset.path);
+    else open.add(source.dataset.path);
+    render({ keepScroll: true });
+  } else if (action === "ctx-all" || action === "ctx-none") {
+    if (state.chat.sending) return;
+    setContextLeaves(contextLeaves(), action === "ctx-all");
+    render({ keepScroll: true });
+  } else if (action === "toggle-context-preview") {
+    state.chat.contextPreview = !state.chat.contextPreview;
+    render({ keepScroll: true });
+  } else if (action === "download-bitbucket-context") {
+    const data = bitbucketContextData();
+    if (!data) {
+      state.error = "Não há dados do Bitbucket salvos. Clique em Atualizar primeiro.";
+      render({ keepScroll: true });
+      return;
+    }
+    download("contexto-bitbucket.json", JSON.stringify(data, null, 2), "json");
   } else if (action === "clear-chat") {
     if (state.chat.sending) return;
     state.chat.messages = [];
@@ -489,6 +572,19 @@ document.body.addEventListener("change", (event) => {
   if (target.dataset.action === "include-token") {
     state.config.includeTokenInUrl = target.checked;
     saveConfig(state.config);
+    render({ keepScroll: true });
+    return;
+  }
+  if (target.dataset.action === "chat-context-toggle") {
+    state.chat.useContext = target.checked;
+    state.chat.contextCollapsed = false;
+    if (target.checked) state.chat.contextData = bitbucketContextData();
+    state.chat.error = "";
+    render({ keepScroll: true });
+    return;
+  }
+  if (target.dataset.action === "ctx-toggle") {
+    if (!state.chat.sending) setContextLeaves(contextLeaves(target.dataset.path), target.checked);
     render({ keepScroll: true });
     return;
   }
