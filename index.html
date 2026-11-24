@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Crizsopha · Bitbucket</title>
+  <link rel="icon" href="views/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="views/app.css">
+</head>
+<body>
+  <div id="app" class="boot">Carregando o painel…</div>
+  <script nomodule>
+    document.getElementById("app").textContent = "Use Edge ou Chrome atualizado para abrir este painel.";
+  </script>
+  <script type="module" src="controllers/app.js"></script>
+<script>
+  setTimeout(function () {
+    var el = document.getElementById("app");
+    if (!el || !el.classList.contains("boot")) return;
+    if (el.textContent.indexOf("Carregando") === -1) return;
+    el.textContent = "Nao foi possivel carregar o painel. Recarregue a pagina. Se continuar, execute iniciar.bat e abra http://127.0.0.1:8765.";
+  }, 4000);
+</script>
+</body>
+</html>
