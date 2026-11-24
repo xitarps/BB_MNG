@@ -2,6 +2,7 @@ import { destinationFor, normalizeWorkspace, validateConfig, clampInt, cleanToke
 import { explainError, createClient, slimPullRequest } from "../models/bitbucket.js";
 import { buildClonePlan } from "../models/clone-script.js";
 import { buildUpdatePlan } from "../models/update-script.js";
+import { DEFAULT_CLAUDE_MODEL, loadClaudeConfig, saveClaudeConfig, sendClaudeMessage } from "../models/claude.js";
 import { filterRepos } from "../models/metrics.js";
 import { clearSnapshot, forgetToken, loadConfig, loadSnapshot, loadWorkspaces, saveConfig } from "../models/storage.js";
 import { formatDate } from "../models/format.js";
@@ -26,6 +27,15 @@ const pages = {
   settings: renderSettings
 };
 
+let claudeConfig;
+let claudeConfigError = "";
+try {
+  claudeConfig = loadClaudeConfig();
+} catch (error) {
+  claudeConfig = { apiKey: "", model: DEFAULT_CLAUDE_MODEL };
+  claudeConfigError = error.message;
+}
+
 const state = {
   route: "dashboard",
   config: loadConfig(),
@@ -35,9 +45,11 @@ const state = {
   userError: "",
   syncing: false,
   statusText: "",
-  error: "",
+  error: claudeConfigError,
   notice: "",
   abort: null,
+  claude: claudeConfig,
+  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false },
   ui: {
     prQuery: "",
     prAuthor: "",
@@ -68,12 +80,24 @@ else if (!state.config.token) state.route = "settings";
 function render({ keepScroll = false } = {}) {
   const content = document.querySelector(".content");
   const y = keepScroll ? content?.scrollTop || 0 : 0;
+  const chatInput = document.activeElement?.id === "chat-draft" ? document.activeElement : null;
+  const selection = chatInput ? [chatInput.selectionStart, chatInput.selectionEnd] : null;
+  const chatLog = document.querySelector(".chat-messages");
+  const chatScroll = chatLog?.scrollTop || 0;
+  const wasAtBottom = !chatLog || chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 30;
   const page = pages[state.route] || renderDashboard;
   const root = document.getElementById("app");
   root.classList.remove("boot");
   root.innerHTML = renderShell(state, page(state));
   const next = document.querySelector(".content");
   if (next) next.scrollTop = y;
+  const nextLog = document.querySelector(".chat-messages");
+  if (nextLog) nextLog.scrollTop = wasAtBottom ? nextLog.scrollHeight : chatScroll;
+  const nextInput = document.getElementById("chat-draft");
+  if (selection && nextInput && !nextInput.disabled) {
+    nextInput.focus();
+    nextInput.setSelectionRange(...selection);
+  }
   ensureReviewers();
 }
 
@@ -226,6 +250,40 @@ function currentRepoPlan() {
   return build(cloneSelection(state), state.config);
 }
 
+async function sendChat() {
+  const chat = state.chat;
+  if (chat.sending) return;
+  const text = chat.draft.trim();
+  if (!text) {
+    chat.error = "Escreva uma mensagem antes de enviar.";
+    render({ keepScroll: true });
+    return;
+  }
+  if ([state.config.token, state.claude.apiKey].some((secret) => secret && text.includes(secret))) {
+    chat.error = "A mensagem contém uma credencial configurada. Remova-a antes de enviar.";
+    render({ keepScroll: true });
+    return;
+  }
+  chat.messages.push({ role: "user", content: text });
+  chat.draft = "";
+  chat.error = "";
+  chat.truncated = false;
+  chat.sending = true;
+  render({ keepScroll: true });
+  try {
+    const result = await sendClaudeMessage(state.claude, chat.messages);
+    chat.messages.push({ role: "assistant", content: result.text });
+    chat.truncated = result.truncated;
+  } catch (error) {
+    chat.messages.pop();
+    chat.draft = text;
+    chat.error = error.message;
+  } finally {
+    chat.sending = false;
+    render({ keepScroll: true });
+  }
+}
+
 function addManualRepo() {
   const input = document.querySelector("[data-action='manual-slug']");
   const slug = (input?.value || state.ui.manualSlug || "").trim();
@@ -270,7 +328,30 @@ document.body.addEventListener("click", (event) => {
   const action = event.target.closest("[data-action]")?.dataset.action;
   const source = event.target.closest("[data-action]");
   if (!action) return;
-  if (action === "sync") {
+  if (action === "open-chat" || action === "close-chat") {
+    state.chat.open = action === "open-chat";
+    render({ keepScroll: true });
+    if (state.chat.open) document.getElementById("chat-draft")?.focus();
+    else document.querySelector("[data-action='open-chat']")?.focus();
+  } else if (action === "clear-chat") {
+    if (state.chat.sending) return;
+    state.chat.messages = [];
+    state.chat.error = "";
+    state.chat.truncated = false;
+    render({ keepScroll: true });
+  } else if (action === "forget-claude") {
+    if (state.chat.sending) return;
+    const config = { ...state.claude, apiKey: "" };
+    try {
+      saveClaudeConfig(config);
+      state.claude = config;
+      state.notice = "Chave do Claude apagada deste navegador.";
+      state.error = "";
+    } catch (error) {
+      state.error = "Não foi possível apagar a chave do Claude no navegador.";
+    }
+    render({ keepScroll: true });
+  } else if (action === "sync") {
     readSettingsForm();
     const problem = validateConfig(state.config, { requireWorkspace: true });
     if (problem) {
@@ -430,12 +511,41 @@ document.body.addEventListener("change", (event) => {
 document.body.addEventListener("input", (event) => {
   const target = event.target;
   if (target.dataset.action === "manual-slug") state.ui.manualSlug = target.value;
+  if (target.dataset.action === "chat-draft") state.chat.draft = target.value;
   applyLiveFilter(target.closest("[data-filter]") || target);
 });
 
 document.body.addEventListener("submit", (event) => {
-  const form = event.target.closest("form[data-action='save-config']");
+  const form = event.target.closest("form[data-action]");
   if (!form) return;
+  if (form.dataset.action === "send-chat") {
+    event.preventDefault();
+    sendChat();
+    return;
+  }
+  if (form.dataset.action === "save-claude") {
+    event.preventDefault();
+    const data = new FormData(form);
+    const model = String(data.get("model") || "").trim();
+    const apiKey = String(data.get("apiKey") || "").trim() || state.claude.apiKey;
+    if (!/^[a-zA-Z0-9._-]{1,128}$/.test(model) || /[\r\n]/.test(apiKey)) {
+      state.error = "Confira o ID do modelo e a chave da API do Claude.";
+      state.notice = "";
+    } else {
+      try {
+        saveClaudeConfig({ model, apiKey });
+        state.claude = { model, apiKey };
+        state.error = "";
+        state.notice = "Configuração do Claude salva neste navegador.";
+      } catch (error) {
+        state.error = "Não foi possível salvar a configuração do Claude neste navegador.";
+        state.notice = "";
+      }
+    }
+    render({ keepScroll: true });
+    return;
+  }
+  if (form.dataset.action !== "save-config") return;
   event.preventDefault();
   readSettingsForm();
   const problem = validateConfig(state.config);

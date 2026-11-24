@@ -1,5 +1,6 @@
 import { escapeHtml } from "../models/format.js";
 import { ROUTES } from "./html.js";
+import { renderChat } from "./chat.js";
 
 function hostWarning() {
   const host = location.hostname;
@@ -43,5 +44,5 @@ export function renderShell(state, content) {
         ${content}
       </div>
     </div>
-  </div>`;
+  </div>${renderChat(state)}`;
 }

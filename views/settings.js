@@ -42,6 +42,17 @@ export function renderSettings(state) {
       ${state.user ? `<p class="help wide">Conectado como ${escapeHtml(state.user.display_name)} (${escapeHtml(state.user.nickname || "sem nickname")}).</p>` : ""}
       ${state.userError ? `<p class="help wide">${escapeHtml(state.userError)}</p>` : ""}
     </form>
+    <form class="card form" data-action="save-claude" autocomplete="off">
+      <h2 class="wide">IA pessoal · Claude</h2>
+      <p class="help wide">A chave fica no localStorage deste navegador, acessível a scripts desta origem. Use apenas um computador confiável. As conversas são enviadas diretamente à Anthropic e podem gerar cobrança; não inclua dados privados ou credenciais. O Claude não recebe dados automáticos do Bitbucket ou Jira.</p>
+      <label class="field wide"><span>Chave de API ${state.claude.apiKey ? "— já salva; preencha apenas para substituir" : ""}</span>
+        <input name="apiKey" type="password" placeholder="${state.claude.apiKey ? "chave armazenada neste navegador" : "chave da API Anthropic"}" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field wide"><span>ID do modelo Claude</span><input name="model" value="${escapeHtml(state.claude.model)}" required spellcheck="false" autocomplete="off"></label>
+      <div class="btn-row wide"><button type="submit" class="primary">Salvar IA</button>
+        <button type="button" class="danger" data-action="forget-claude" ${state.claude.apiKey && !state.chat.sending ? "" : "disabled"}>Esquecer chave</button></div>
+      <p class="help wide">Configure uma chave da API Anthropic; a assinatura do aplicativo Claude pode não incluir acesso à API. A conversa permanece apenas nesta página e é perdida ao recarregar.</p>
+    </form>
     <article class="card">
       <h2>O que este token deve alcançar</h2>
       <p class="sub">Conferência com a tela de scopes que você gerou. Itens desligados não aparecem no painel de propósito.</p>
