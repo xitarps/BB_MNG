@@ -34,9 +34,16 @@ function describe(key, values, path, depth) {
   };
 }
 
-export function buildContextTree(data) {
+// With { grouped: true } every top-level object (e.g. "bitbucket", "jira") becomes a group of its own.
+export function buildContextTree(data, { grouped = false } = {}) {
   if (!isObject(data)) return [];
-  return Object.keys(data).map((key) => describe(key, [data[key]], key, 1));
+  return Object.keys(data).map((key) => {
+    const value = data[key];
+    if (grouped && isObject(value) && Object.keys(value).length) {
+      return { key, path: key, children: Object.keys(value).map((child) => describe(child, [value[child]], `${key}.${child}`, 1)) };
+    }
+    return describe(key, [value], key, 1);
+  });
 }
 
 export function leavesOf(node) {
@@ -81,8 +88,8 @@ export function filterContext(data, tree, excluded) {
   return out;
 }
 
-export function selectedContextText(data, excluded) {
+export function selectedContextText(data, excluded, options) {
   if (!isObject(data)) return "";
-  const filtered = filterContext(data, buildContextTree(data), excluded);
+  const filtered = filterContext(data, buildContextTree(data, options), excluded);
   return Object.keys(filtered).length ? JSON.stringify(filtered, null, 2) : "";
 }

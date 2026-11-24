@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Static server for Crizsopha, plus a same-origin fallback proxy.
+"""Static server for Crizsopha, plus same-origin fallback proxies.
 
 The browser normally calls https://api.bitbucket.org directly.
 If that is blocked, the page retries /bitbucket/* on this process.
-The token is forwarded and never written to disk or to the log.
+Jira Cloud does not allow browser calls (no CORS), so /jira/<site>.atlassian.net/rest/*
+is always forwarded here. Only GET, only *.atlassian.net, no redirects.
+Tokens are forwarded and never written to disk or to the log.
 """
 
 import json
+import os
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 HOST = "127.0.0.1"
-PORT = 8765
+PORT = int(os.environ.get("CRIZSOPHA_PORT", "8765"))
 UPSTREAM = "https://api.bitbucket.org"
+JIRA_HOST = re.compile(r"^[a-z0-9][a-z0-9-]*\.atlassian\.net$")
 ALLOWED = {".html", ".css", ".js", ".svg", ".json", ".ico", ".txt"}
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -27,6 +32,23 @@ MIME = {
     ".ico": "image/x-icon",
     ".txt": "text/plain; charset=utf-8",
 }
+
+
+class NoRedirect(HTTPRedirectHandler):
+    # A redirect would resend the Authorization header to wherever Location points.
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+JIRA_OPENER = build_opener(NoRedirect)
+
+
+def jira_upstream(path):
+    """Map /jira/<host>/rest/... to the Jira Cloud URL, or None if it is not allowed."""
+    host, _, tail = path[len("/jira/"):].partition("/")
+    if not JIRA_HOST.match(host) or not tail.startswith("rest/"):
+        return None
+    return "https://%s/%s" % (host, tail)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -69,7 +91,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/bitbucket" or path.startswith("/bitbucket/"):
             self._proxy(head)
             return
+        if path == "/jira" or path.startswith("/jira/"):
+            self._jira(head)
+            return
         self._static(path, head)
+
+    def _jira(self, head):
+        upstream = jira_upstream(self.path) if self.path.startswith("/jira/") else None
+        if not upstream:
+            self._send(400, b'{"error":{"message":"caminho invalido"}}', "application/json", head)
+            return
+        headers = {"Accept": "application/json", "User-Agent": "crizsopha-local"}
+        auth = self.headers.get("Authorization")
+        if auth:
+            headers["Authorization"] = auth
+        try:
+            request = Request(upstream, headers=headers, method="GET")
+            with JIRA_OPENER.open(request, timeout=60) as response:
+                self._send(response.status, response.read(), response.headers.get("Content-Type", "application/json"), head)
+        except HTTPError as error:
+            self._send(error.code, error.read(), error.headers.get("Content-Type", "application/json"), head)
+        except (URLError, ValueError) as error:
+            reason = getattr(error, "reason", error)
+            payload = json.dumps({"error": {"message": str(reason)}}).encode("utf-8")
+            self._send(502, payload, "application/json", head)
 
     def _proxy(self, head):
         upstream = UPSTREAM + self.path[len("/bitbucket"):]
@@ -114,7 +159,7 @@ class Server(ThreadingHTTPServer):
 def main():
     server = Server((HOST, PORT), Handler)
     print("Crizsopha em http://%s:%s/" % (HOST, PORT))
-    print("Ctrl+C encerra. O token nao e gravado aqui.")
+    print("Ctrl+C encerra. Os tokens nao sao gravados aqui.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

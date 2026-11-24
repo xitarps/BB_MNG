@@ -17,6 +17,7 @@ function targetsFor(path) {
 
 export function explainError(error) {
   if (!error) return "Falha desconhecida.";
+  if (error.userMessage) return error.userMessage;
   if (error.name === "AbortError") return "Consulta cancelada.";
   if (error instanceof TypeError || error.network) {
     return "O navegador não conseguiu falar com o Bitbucket. Abra o painel por iniciar.bat em http://127.0.0.1:8765 e tente de novo.";

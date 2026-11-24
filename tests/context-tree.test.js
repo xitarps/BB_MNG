@@ -52,3 +52,29 @@ test("selectedContextText is empty when nothing is selected and ignores stale ex
   assert.equal(selectedContextText(null, new Set()), "");
   assert.deepEqual(JSON.parse(selectedContextText(data, new Set(["removed.field"]))), data);
 });
+
+const combined = {
+  bitbucket: { summary: { total: 3, by_author: { Ana: 2 } }, pull_requests: [{ id: 1, author: "Ana" }] },
+  jira: { summary: { total: 5 }, issues: [{ key: "ABC-1", assignee: "Juliano" }, { key: "ABC-2", assignee: "" }] }
+};
+const groups = { grouped: true };
+
+test("grouped mode makes one group per source and keeps per-source field rules", () => {
+  const tree = buildContextTree(combined, groups);
+  assert.deepEqual(tree.map((node) => node.key), ["bitbucket", "jira"]);
+  assert.deepEqual(findNode(tree, "jira").children.map((node) => node.key), ["summary", "issues"]);
+  assert.deepEqual(findNode(tree, "jira.summary").children.map((node) => node.key), ["total"]);
+  assert.ok(leavesOf(findNode(tree, "bitbucket.summary")).includes("bitbucket.summary.by_author"), "dynamic maps stay one leaf");
+  assert.equal(findNode(tree, "jira.issues").count, 2);
+  assert.deepEqual(JSON.parse(selectedContextText(combined, new Set(), groups)), combined);
+});
+
+test("unchecking a whole source or one of its fields only affects that source", () => {
+  const tree = buildContextTree(combined, groups);
+  const noJira = JSON.parse(selectedContextText(combined, new Set(leavesOf(findNode(tree, "jira"))), groups));
+  assert.deepEqual(Object.keys(noJira), ["bitbucket"]);
+  const noAssignee = JSON.parse(selectedContextText(combined, new Set(["jira.issues.assignee"]), groups));
+  assert.deepEqual(noAssignee.jira.issues, [{ key: "ABC-1" }, { key: "ABC-2" }]);
+  assert.deepEqual(noAssignee.bitbucket, combined.bitbucket);
+  assert.equal(selectedContextText(combined, new Set(tree.flatMap(leavesOf)), groups), "");
+});

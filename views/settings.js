@@ -1,4 +1,5 @@
 import { escapeHtml } from "../models/format.js";
+import { JIRA_SCOPES } from "../models/jira-config.js";
 import { DECLARED_SCOPES } from "../models/scopes.js";
 import { pageHead, tag } from "./html.js";
 
@@ -8,6 +9,7 @@ function modeOption(value, current, label) {
 
 export function renderSettings(state) {
   const config = state.config;
+  const jira = state.jiraConfig;
   const hasToken = Boolean(config.token);
   return `${pageHead("Configuração", "O token fica no localStorage deste navegador. Nada é gravado em arquivo pelo painel.")}
     <form class="card form" data-action="save-config" autocomplete="off">
@@ -43,9 +45,32 @@ export function renderSettings(state) {
       ${state.user ? `<p class="help wide">Conectado como ${escapeHtml(state.user.display_name)} (${escapeHtml(state.user.nickname || "sem nickname")}).</p>` : ""}
       ${state.userError ? `<p class="help wide">${escapeHtml(state.userError)}</p>` : ""}
     </form>
+    <form class="card form" data-action="save-jira" autocomplete="off">
+      <h2 class="wide">Jira Cloud</h2>
+      <p class="help wide">O e-mail e o API token ficam no localStorage deste navegador. As consultas passam pelo servidor local do painel (iniciar.bat ou iniciar.sh), porque o Jira não aceita chamadas diretas do navegador; o servidor só repassa a requisição e não grava o token. Use um API token da Atlassian <b>sem escopos</b> (id.atlassian.com → Segurança → API tokens).</p>
+      <label class="field wide"><span>Endereço do Jira</span><input name="site" value="${escapeHtml(jira.site)}" placeholder="empresa.atlassian.net" spellcheck="false" autocomplete="off"></label>
+      <label class="field"><span>E-mail da conta Atlassian</span><input name="email" type="email" value="${escapeHtml(jira.email)}" placeholder="voce@empresa.com" autocomplete="off"></label>
+      <label class="field"><span>API token ${jira.token ? "— já salvo; preencha apenas para substituir" : ""}</span>
+        <input name="token" type="password" placeholder="${jira.token ? "token armazenado localmente" : "cole o API token"}" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>Projetos (opcional, separados por vírgula)</span><input name="projects" value="${escapeHtml(jira.projects)}" placeholder="ABC, XYZ — vazio lê todos os visíveis" spellcheck="false" autocomplete="off"></label>
+      <label class="field"><span>Quais issues buscar</span>
+        <select name="scope">${Object.entries(JIRA_SCOPES).map(([value, label]) => `<option value="${value}" ${value === jira.scope ? "selected" : ""}>${label}</option>`).join("")}</select>
+      </label>
+      <label class="field"><span>Limite de issues (50 a 1000)</span><input name="maxIssues" type="number" min="50" max="1000" value="${jira.maxIssues}" autocomplete="off"></label>
+      <label class="field wide"><span>JQL personalizada (opcional; substitui projetos e filtro acima)</span><input name="jql" value="${escapeHtml(jira.jql)}" placeholder='assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC' spellcheck="false" autocomplete="off"></label>
+      <div class="btn-row wide">
+        <button type="submit" class="primary">Salvar Jira</button>
+        <button type="button" class="ghost" data-action="test-jira">Testar conexão</button>
+        <button type="button" class="danger" data-action="forget-jira">Esquecer token</button>
+        <button type="button" class="ghost" data-action="clear-jira-cache">Limpar cache do Jira</button>
+        <button type="button" class="ghost" data-action="download-jira-context">Baixar JSON do Jira</button>
+      </div>
+      ${state.jiraUser ? `<p class="help wide">Conectado ao Jira como ${escapeHtml(state.jiraUser.display_name)}.</p>` : ""}
+      <p class="help wide">A consulta precisa de uma restrição (por exemplo, status ou datas): o Jira recusa buscas sem limites. A leitura usa apenas GET e o escopo equivalente a "ler issues e projetos".</p>
+    </form>
     <form class="card form" data-action="save-claude" autocomplete="off">
       <h2 class="wide">IA pessoal · Claude</h2>
-      <p class="help wide">A chave fica no localStorage deste navegador, acessível a scripts desta origem. Use apenas um computador confiável. As conversas são enviadas diretamente à Anthropic e podem gerar cobrança; não inclua credenciais. O Claude só recebe dados do Bitbucket quando você liga "Anexar contexto do Bitbucket" no chat e envia a mensagem; você escolhe, campo a campo, o que anexar antes do envio.</p>
+      <p class="help wide">A chave fica no localStorage deste navegador, acessível a scripts desta origem. Use apenas um computador confiável. As conversas são enviadas diretamente à Anthropic e podem gerar cobrança; não inclua credenciais. O Claude só recebe dados do Bitbucket ou do Jira quando você liga "Anexar contexto" no chat e envia a mensagem; você escolhe, campo a campo, o que anexar antes do envio.</p>
       <label class="field wide"><span>Chave de API ${state.claude.apiKey ? "— já salva; preencha apenas para substituir" : ""}</span>
         <input name="apiKey" type="password" placeholder="${state.claude.apiKey ? "chave armazenada neste navegador" : "chave da API Anthropic"}" autocomplete="off" spellcheck="false">
       </label>
@@ -61,7 +86,7 @@ export function renderSettings(state) {
     </article>
     <article class="card">
       <h2>Como abrir no Windows</h2>
-      <p class="help">Dê dois cliques em iniciar.bat. Ele sobe um servidor só em 127.0.0.1:8765 e você abre http://127.0.0.1:8765. O navegador chama api.bitbucket.org direto. Se a rede bloquear essa chamada, o mesmo servidor encaminha /bitbucket sem gravar o token.</p>
+      <p class="help">Dê dois cliques em iniciar.bat. Ele sobe um servidor só em 127.0.0.1:8765 e você abre http://127.0.0.1:8765. O navegador chama api.bitbucket.org direto. Se a rede bloquear essa chamada, o mesmo servidor encaminha /bitbucket sem gravar o token. O Jira sempre passa por esse servidor (rota /jira), porque ele não aceita chamadas diretas do navegador.</p>
       <p class="help">No Linux o equivalente é ./iniciar.sh. O interruptor de clone, na aba Clonar, troca o script entre Windows e Linux sem mudar essa parte.</p>
     </article>`;
 }

@@ -32,8 +32,13 @@ try {
 Add-Type -AssemblyName System.Net.Http
 $http = New-Object System.Net.Http.HttpClient
 $http.Timeout = [TimeSpan]::FromSeconds(90)
+# Jira client never follows redirects: a redirect would resend the Authorization header elsewhere.
+$jiraHandler = New-Object System.Net.Http.HttpClientHandler
+$jiraHandler.AllowAutoRedirect = $false
+$jiraHttp = New-Object System.Net.Http.HttpClient($jiraHandler)
+$jiraHttp.Timeout = [TimeSpan]::FromSeconds(90)
 Write-Host "Crizsopha em $prefix"
-Write-Host "Ctrl+C encerra. O token nao e gravado aqui."
+Write-Host "Ctrl+C encerra. Os tokens nao sao gravados aqui."
 
 function Send-Bytes($context, [int]$status, [byte[]]$bytes, [string]$contentType) {
   $context.Response.StatusCode = $status
@@ -86,6 +91,40 @@ try {
         $msg.Dispose()
         continue
       }
+      if ($rawPath -eq "/jira" -or $rawPath.StartsWith("/jira/")) {
+        $pathAndQuery = $context.Request.Url.PathAndQuery
+        $hostName = ""
+        $restPath = ""
+        if ($pathAndQuery.StartsWith("/jira/")) {
+          $tail = $pathAndQuery.Substring(6)
+          $slash = $tail.IndexOf("/")
+          if ($slash -gt 0) {
+            $hostName = $tail.Substring(0, $slash)
+            $restPath = $tail.Substring($slash + 1)
+          }
+        }
+        if (($hostName -cnotmatch '^[a-z0-9][a-z0-9-]*\.atlassian\.net$') -or (-not $restPath.StartsWith("rest/"))) {
+          Send-Text $context 400 '{"error":{"message":"caminho invalido"}}' "application/json"
+          continue
+        }
+        $jiraMsg = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, ("https://" + $hostName + "/" + $restPath))
+        $jiraAuth = $context.Request.Headers["Authorization"]
+        if ($jiraAuth) { [void]$jiraMsg.Headers.TryAddWithoutValidation("Authorization", $jiraAuth) }
+        [void]$jiraMsg.Headers.TryAddWithoutValidation("Accept", "application/json")
+        [void]$jiraMsg.Headers.TryAddWithoutValidation("User-Agent", "crizsopha-local")
+        try {
+          $jiraResp = $jiraHttp.SendAsync($jiraMsg).GetAwaiter().GetResult()
+          $jiraBytes = $jiraResp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+          $jiraType = "application/json"
+          if ($jiraResp.Content.Headers.ContentType) { $jiraType = $jiraResp.Content.Headers.ContentType.ToString() }
+          Send-Bytes $context ([int]$jiraResp.StatusCode) $jiraBytes $jiraType
+          $jiraResp.Dispose()
+        } catch {
+          Send-Text $context 502 '{"error":{"message":"falha ao falar com o Jira"}}' "application/json"
+        }
+        $jiraMsg.Dispose()
+        continue
+      }
       $rel = [Uri]::UnescapeDataString($rawPath)
       if ($rel -eq "/") { $rel = "/index.html" }
       $rel = $rel.TrimStart("/").Replace("/", [IO.Path]::DirectorySeparatorChar)
@@ -107,4 +146,5 @@ try {
 } finally {
   $listener.Stop()
   $http.Dispose()
+  $jiraHttp.Dispose()
 }

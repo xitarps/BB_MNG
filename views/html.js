@@ -41,12 +41,16 @@ export function tag(text, kind = "") {
   return `<span class="tag ${kind}">${escapeHtml(text)}</span>`;
 }
 
+// [id, label, group]; the shell prints a small heading whenever the group changes.
 export const ROUTES = [
-  ["dashboard", "Painel"],
-  ["prs", "Pull requests"],
-  ["repos", "Repositórios"],
-  ["pipelines", "Pipelines"],
-  ["runners", "Runners"],
-  ["clone", "Clonar / atualizar"],
-  ["settings", "Configuração"]
+  ["dashboard", "Painel", "Bitbucket"],
+  ["prs", "Pull requests", "Bitbucket"],
+  ["repos", "Repositórios", "Bitbucket"],
+  ["pipelines", "Pipelines", "Bitbucket"],
+  ["runners", "Runners", "Bitbucket"],
+  ["clone", "Clonar / atualizar", "Bitbucket"],
+  ["jira", "Painel Jira", "Jira"],
+  ["jira-issues", "Issues", "Jira"],
+  ["jira-projects", "Projetos", "Jira"],
+  ["settings", "Configuração", "Geral"]
 ];

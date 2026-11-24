@@ -6,7 +6,7 @@ import { DEFAULT_CLAUDE_MODEL, MAX_CONTEXT_CHARS, loadClaudeConfig, saveClaudeCo
 import { buildBitbucketContext } from "../models/bitbucket-context.js";
 import { buildContextTree, findNode, leavesOf, selectedContextText } from "../models/context-tree.js";
 import { filterRepos } from "../models/metrics.js";
-import { clearSnapshot, forgetToken, loadBitbucketContext, loadConfig, loadContextExcluded, loadSnapshot, loadWorkspaces, saveConfig, saveContextExcluded } from "../models/storage.js";
+import { clearJiraSnapshot, clearSnapshot, forgetJiraToken, forgetToken, loadBitbucketContext, loadConfig, loadContextExcluded, loadJiraConfig, loadJiraContext, loadJiraSnapshot, loadSnapshot, loadWorkspaces, saveConfig, saveContextExcluded, saveJiraConfig } from "../models/storage.js";
 import { formatDate } from "../models/format.js";
 import { renderShell } from "../views/shell.js";
 import { renderDashboard } from "../views/dashboard.js";
@@ -18,6 +18,10 @@ import { cloneSelection, renderClone, renderCloneList } from "../views/clone.js"
 import { renderSettings } from "../views/settings.js";
 import { ROUTES } from "../views/html.js";
 import { refreshReviewers, syncAll, testConnection } from "./sync.js";
+import { syncJira, testJiraConnection } from "./jira-sync.js";
+import { buildJiraContext } from "../models/jira-context.js";
+import { buildJql, normalizeJiraSite, validateJiraConfig } from "../models/jira-config.js";
+import { renderJiraDashboard, renderJiraIssues, renderJiraProjects, renderJiraTable } from "../views/jira.js";
 
 const pages = {
   dashboard: renderDashboard,
@@ -26,8 +30,16 @@ const pages = {
   pipelines: renderPipelines,
   runners: renderRunners,
   clone: renderClone,
+  jira: renderJiraDashboard,
+  "jira-issues": renderJiraIssues,
+  "jira-projects": renderJiraProjects,
   settings: renderSettings
 };
+
+const GROUPED = { grouped: true };
+const SOURCE_PREFIX = /^(bitbucket|jira)\./;
+// Exclusions saved before the Jira groups existed referred to Bitbucket fields without the group prefix.
+const savedExclusions = loadContextExcluded().map((path) => (SOURCE_PREFIX.test(path) ? path : `bitbucket.${path}`));
 
 let claudeConfig;
 let claudeConfigError = "";
@@ -45,13 +57,16 @@ const state = {
   workspaces: loadWorkspaces(),
   user: loadSnapshot()?.user || null,
   userError: "",
+  jiraConfig: loadJiraConfig(),
+  jiraSnapshot: loadJiraSnapshot(),
+  jiraUser: loadJiraSnapshot()?.user || null,
   syncing: false,
   statusText: "",
   error: claudeConfigError,
   notice: "",
   abort: null,
   claude: claudeConfig,
-  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(loadContextExcluded()), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false },
+  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(savedExclusions), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false },
   ui: {
     prQuery: "",
     prAuthor: "",
@@ -70,7 +85,15 @@ const state = {
     cloneReveal: false,
     repoOperation: "clone",
     manualSlug: "",
-    manualRepos: []
+    manualRepos: [],
+    jiraQuery: "",
+    jiraScope: "open",
+    jiraProject: "",
+    jiraStatus: "",
+    jiraType: "",
+    jiraAssignee: "",
+    jiraPage: 1,
+    jiraPageSize: 10
   }
 };
 
@@ -135,8 +158,10 @@ function applyLiveFilter(control) {
   if (!name) return;
   state.ui[name] = control.value;
   if (name.startsWith("pr")) state.ui.prPage = 1;
+  if (name.startsWith("jira")) state.ui.jiraPage = 1;
   const slot = control.dataset.live;
   if (slot === "pr-table") patch("pr-table", renderPrTable(state));
+  if (slot === "jira-table") patch("jira-table", renderJiraTable(state));
   if (slot === "repo-table") patch("repo-table", renderRepoTable(state));
   if (slot === "clone-list") patch("clone-list", renderCloneList(state));
 }
@@ -169,6 +194,25 @@ function readSettingsForm() {
   };
   saveConfig(state.config);
   return state.config;
+}
+
+function readJiraForm() {
+  const form = document.querySelector("form[data-action='save-jira']");
+  if (!form) return state.jiraConfig;
+  const data = new FormData(form);
+  const previous = state.jiraConfig;
+  state.jiraConfig = {
+    ...previous,
+    site: normalizeJiraSite(data.get("site")),
+    email: String(data.get("email") || "").trim(),
+    token: cleanToken(data.get("token")) || previous.token,
+    projects: String(data.get("projects") || "").trim(),
+    scope: data.get("scope") === "recent" ? "recent" : "open",
+    maxIssues: clampInt(data.get("maxIssues"), 50, 1000, 300),
+    jql: String(data.get("jql") || "").trim()
+  };
+  saveJiraConfig(state.jiraConfig);
+  return state.jiraConfig;
 }
 
 async function runTask(label, task) {
@@ -257,20 +301,36 @@ function currentRepoPlan() {
   return build(cloneSelection(state), state.config);
 }
 
-function bitbucketContextData() {
-  const stored = loadBitbucketContext();
-  if (stored) {
-    try {
-      return JSON.parse(stored);
-    } catch {
-      // A corrupted copy falls back to rebuilding from the cached snapshot.
-    }
+function parseStored(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    // A corrupted copy falls back to rebuilding from the cached snapshot.
+    return null;
   }
-  return buildBitbucketContext(state.snapshot);
+}
+
+function bitbucketContextData() {
+  return parseStored(loadBitbucketContext()) || buildBitbucketContext(state.snapshot);
+}
+
+function jiraContextData() {
+  return parseStored(loadJiraContext()) || buildJiraContext(state.jiraSnapshot);
+}
+
+// One tree for the chat: a group per source that has data.
+function chatContextData() {
+  const data = {};
+  const bitbucket = bitbucketContextData();
+  const jira = jiraContextData();
+  if (bitbucket) data.bitbucket = bitbucket;
+  if (jira) data.jira = jira;
+  return Object.keys(data).length ? data : null;
 }
 
 function chatContextText() {
-  return selectedContextText(state.chat.contextData, state.chat.contextExcluded);
+  return selectedContextText(state.chat.contextData, state.chat.contextExcluded, GROUPED);
 }
 
 function setContextLeaves(paths, selected) {
@@ -283,7 +343,7 @@ function setContextLeaves(paths, selected) {
 }
 
 function contextLeaves(path) {
-  const tree = buildContextTree(state.chat.contextData);
+  const tree = buildContextTree(state.chat.contextData, GROUPED);
   if (path === undefined) return tree.flatMap(leavesOf);
   const node = findNode(tree, path);
   return node ? leavesOf(node) : [];
@@ -300,7 +360,7 @@ async function sendChat() {
     return;
   }
   if (chat.useContext && !context) {
-    chat.error = "Não há contexto do Bitbucket selecionado. Marque campos, atualize o painel ou desligue o switch.";
+    chat.error = "Não há contexto selecionado. Marque campos, atualize o Bitbucket ou o Jira, ou desligue o switch.";
     render({ keepScroll: true });
     return;
   }
@@ -309,7 +369,7 @@ async function sendChat() {
     render({ keepScroll: true });
     return;
   }
-  if ([state.config.token, state.claude.apiKey].some((secret) => secret && (text.includes(secret) || context.includes(secret)))) {
+  if ([state.config.token, state.jiraConfig.token, state.claude.apiKey].some((secret) => secret && (text.includes(secret) || context.includes(secret)))) {
     chat.error = "A mensagem ou o contexto contém uma credencial configurada. Remova-a antes de enviar.";
     render({ keepScroll: true });
     return;
@@ -324,8 +384,6 @@ async function sendChat() {
     const result = await sendClaudeMessage(state.claude, chat.messages);
     chat.messages.push({ role: "assistant", content: result.text });
     chat.truncated = result.truncated;
-    // The attached context stays in the conversation, so the switch resets to avoid resending it by accident.
-    if (context) chat.useContext = false;
   } catch (error) {
     chat.messages.pop();
     chat.draft = text;
@@ -393,7 +451,7 @@ document.body.addEventListener("click", (event) => {
     render({ keepScroll: true });
   } else if (action === "reload-chat-context") {
     if (state.chat.sending) return;
-    state.chat.contextData = bitbucketContextData();
+    state.chat.contextData = chatContextData();
     state.chat.error = "";
     render({ keepScroll: true });
   } else if (action === "ctx-expand") {
@@ -446,6 +504,52 @@ document.body.addEventListener("click", (event) => {
   } else if (action === "pr-page") {
     state.ui.prPage = Math.max(1, (Number(state.ui.prPage) || 1) + (source.dataset.value === "next" ? 1 : -1));
     patch("pr-table", renderPrTable(state));
+  } else if (action === "jira-page") {
+    state.ui.jiraPage = Math.max(1, (Number(state.ui.jiraPage) || 1) + (source.dataset.value === "next" ? 1 : -1));
+    patch("jira-table", renderJiraTable(state));
+  } else if (action === "sync-jira") {
+    readJiraForm();
+    const problem = validateJiraConfig(state.jiraConfig);
+    if (problem) {
+      state.error = problem;
+      go("settings");
+      return;
+    }
+    runTask("Consultando o Jira…", (signal, setStatus) => syncJira(state, signal, setStatus));
+  } else if (action === "test-jira") {
+    readJiraForm();
+    const problem = validateJiraConfig(state.jiraConfig);
+    if (problem) {
+      state.error = problem;
+      state.notice = "";
+      render({ keepScroll: true });
+      return;
+    }
+    runTask("Testando conexão com o Jira…", async (signal, setStatus) => {
+      const user = await testJiraConnection(state, signal);
+      setStatus("Conexão com o Jira confirmada.");
+      state.notice = `Jira aceitou as credenciais: ${user?.display_name || "conta identificada"}. Consulta que será usada: ${buildJql(state.jiraConfig)}`;
+    });
+  } else if (action === "forget-jira") {
+    state.jiraConfig = forgetJiraToken();
+    state.jiraUser = null;
+    state.notice = "Token do Jira apagado deste navegador.";
+    state.error = "";
+    render({ keepScroll: true });
+  } else if (action === "clear-jira-cache") {
+    clearJiraSnapshot();
+    state.jiraSnapshot = null;
+    state.notice = "Cache do Jira apagado. O token continua salvo.";
+    state.error = "";
+    render({ keepScroll: true });
+  } else if (action === "download-jira-context") {
+    const data = jiraContextData();
+    if (!data) {
+      state.error = "Não há dados do Jira salvos. Atualize o Jira primeiro.";
+      render({ keepScroll: true });
+      return;
+    }
+    download("contexto-jira.json", JSON.stringify(data, null, 2), "json");
   } else if (action === "cancel") {
     state.abort?.abort();
   } else if (action === "test-connection") {
@@ -578,7 +682,7 @@ document.body.addEventListener("change", (event) => {
   if (target.dataset.action === "chat-context-toggle") {
     state.chat.useContext = target.checked;
     state.chat.contextCollapsed = false;
-    if (target.checked) state.chat.contextData = bitbucketContextData();
+    if (target.checked) state.chat.contextData = chatContextData();
     state.chat.error = "";
     render({ keepScroll: true });
     return;
@@ -617,6 +721,15 @@ document.body.addEventListener("submit", (event) => {
   if (form.dataset.action === "send-chat") {
     event.preventDefault();
     sendChat();
+    return;
+  }
+  if (form.dataset.action === "save-jira") {
+    event.preventDefault();
+    readJiraForm();
+    const problem = validateJiraConfig(state.jiraConfig);
+    state.error = problem;
+    state.notice = problem ? "" : "Configuração do Jira salva neste navegador.";
+    render({ keepScroll: true });
     return;
   }
   if (form.dataset.action === "save-claude") {
