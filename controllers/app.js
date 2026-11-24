@@ -1,6 +1,7 @@
 import { destinationFor, normalizeWorkspace, validateConfig, clampInt, cleanToken } from "../models/config.js";
 import { explainError, createClient, slimPullRequest } from "../models/bitbucket.js";
 import { buildClonePlan } from "../models/clone-script.js";
+import { buildUpdatePlan } from "../models/update-script.js";
 import { filterRepos } from "../models/metrics.js";
 import { clearSnapshot, forgetToken, loadConfig, loadSnapshot, loadWorkspaces, saveConfig } from "../models/storage.js";
 import { formatDate } from "../models/format.js";
@@ -53,6 +54,7 @@ const state = {
     prDetail: null,
     prDetailLoading: false,
     cloneReveal: false,
+    repoOperation: "clone",
     manualSlug: "",
     manualRepos: []
   }
@@ -219,6 +221,11 @@ function download(filename, content, shell) {
   URL.revokeObjectURL(link.href);
 }
 
+function currentRepoPlan() {
+  const build = state.ui.repoOperation === "update" ? buildUpdatePlan : buildClonePlan;
+  return build(cloneSelection(state), state.config);
+}
+
 function addManualRepo() {
   const input = document.querySelector("[data-action='manual-slug']");
   const slug = (input?.value || state.ui.manualSlug || "").trim();
@@ -317,7 +324,16 @@ document.body.addEventListener("click", (event) => {
     render({ keepScroll: true });
   } else if (action === "clone-one") {
     state.ui.selectedRepos = [source.dataset.repo];
+    state.ui.repoOperation = "clone";
     go("clone");
+  } else if (action === "update-one") {
+    state.ui.selectedRepos = [source.dataset.repo];
+    state.ui.repoOperation = "update";
+    go("clone");
+  } else if (action === "set-repo-operation") {
+    state.ui.repoOperation = source.dataset.value === "update" ? "update" : "clone";
+    state.ui.cloneReveal = false;
+    render({ keepScroll: true });
   } else if (action === "set-os") {
     const os = source.dataset.value === "linux" ? "linux" : "windows";
     state.config.os = os;
@@ -345,10 +361,10 @@ document.body.addEventListener("click", (event) => {
   } else if (action === "add-manual") {
     addManualRepo();
   } else if (action === "copy-script") {
-    const plan = buildClonePlan(cloneSelection(state), state.config);
+    const plan = currentRepoPlan();
     if (!plan.script) return;
     navigator.clipboard.writeText(plan.script).then(() => {
-      state.notice = state.config.includeTokenInUrl
+      state.notice = (state.ui.repoOperation === "update" && state.config.protocol === "https") || (state.ui.repoOperation === "clone" && state.config.includeTokenInUrl)
         ? "Script copiado com o token. Não deixe esse texto salvo num arquivo do projeto."
         : "Script copiado.";
       state.error = "";
@@ -358,11 +374,11 @@ document.body.addEventListener("click", (event) => {
       render({ keepScroll: true });
     });
   } else if (action === "download-script") {
-    const plan = buildClonePlan(cloneSelection(state), state.config);
+    const plan = currentRepoPlan();
     if (!plan.script) return;
     download(plan.filename, plan.script, plan.shell);
-    state.notice = state.config.includeTokenInUrl
-      ? "Download gerado com o token na URL. Apague o arquivo depois de clonar."
+    state.notice = (state.ui.repoOperation === "update" && state.config.protocol === "https") || (state.ui.repoOperation === "clone" && state.config.includeTokenInUrl)
+      ? "Download gerado com credenciais. Apague o arquivo depois de usar."
       : "Script baixado.";
     render({ keepScroll: true });
   }

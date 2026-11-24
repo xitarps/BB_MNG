@@ -22,7 +22,7 @@ export function renderShell(state, content) {
     <aside class="sidebar">
       <div class="brand"><div class="mark">Cz</div><div><strong>crizsopha</strong><span>bitbucket desk</span></div></div>
       <nav class="nav">${nav}</nav>
-      <p class="side-note">Somente leitura. O token fica neste navegador e só sai em direção ao Bitbucket.</p>
+      <p class="side-note">O token fica neste navegador. Scripts com credenciais exigem cuidado ao copiar ou baixar.</p>
     </aside>
     <div class="main">
       <header class="topbar">

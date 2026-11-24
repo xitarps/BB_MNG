@@ -47,6 +47,6 @@ export const ROUTES = [
   ["repos", "Repositórios"],
   ["pipelines", "Pipelines"],
   ["runners", "Runners"],
-  ["clone", "Clonar"],
+  ["clone", "Clonar / atualizar"],
   ["settings", "Configuração"]
 ];

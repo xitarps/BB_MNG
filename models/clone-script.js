@@ -1,6 +1,6 @@
 import { effectiveShell, gitIdentity } from "./config.js";
 
-function quote(shell, value) {
+export function quote(shell, value) {
   const text = String(value ?? "");
   if (shell === "powershell" || shell === "bash") {
     return `'${text.replace(/'/g, shell === "bash" ? `'\\''` : `''`)}'`;
@@ -108,9 +108,10 @@ function cmdScript(dest, entries, includeToken) {
   return lines.join("\r\n") + "\r\n";
 }
 
-function bashDest(dest) {
+export function bashDest(dest) {
   if (dest.startsWith("$HOME/") || dest.startsWith("~/") || dest === "$HOME") {
-    return `"$HOME${dest.replace(/^(\$HOME|~)/, "")}"`;
+    const suffix = dest.replace(/^(\$HOME|~)\/?/, "");
+    return suffix ? `"$HOME"/${quote("bash", suffix)}` : '"$HOME"';
   }
   return quote("bash", dest);
 }

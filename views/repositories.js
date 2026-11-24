@@ -15,7 +15,7 @@ export function renderRepoTable(state) {
         <td>${escapeHtml(repo.project?.name || "—")}<div class="muted">${escapeHtml(repo.project?.key || "")}</div></td>
         <td>${escapeHtml(repo.language || "—")}<div class="muted">${formatBytes(repo.size)}</div></td>
         <td>${tag(permissions.get(repo.full_name) || "não listado", "info")}</td>
-        <td>${formatDate(repo.updated_on)}<div>${externalLink(repo.html, "abrir")}</div><button type="button" class="text-btn" data-action="clone-one" data-repo="${escapeHtml(repo.full_name)}">clonar</button></td>
+        <td>${formatDate(repo.updated_on)}<div>${externalLink(repo.html, "abrir")}</div><button type="button" class="text-btn" data-action="clone-one" data-repo="${escapeHtml(repo.full_name)}">clonar</button> <button type="button" class="text-btn" data-action="update-one" data-repo="${escapeHtml(repo.full_name)}">atualizar clone</button></td>
       </tr>`).join("")}</tbody>
     </table></div>`;
 }
