@@ -229,6 +229,20 @@ export function slimPullRequest(pr, repo) {
   };
 }
 
+export const COMMENT_TEXT_MAX = 2000;
+
+export function slimComment(comment) {
+  const raw = comment.content?.raw || comment.content?.html?.replace(/<[^>]+>/g, " ") || "";
+  return {
+    id: comment.id,
+    parent_id: comment.parent?.id || null,
+    author: comment.user?.display_name || comment.user?.nickname || "Desconhecido",
+    created_on: comment.created_on || "",
+    text: raw.length > COMMENT_TEXT_MAX ? `${raw.slice(0, COMMENT_TEXT_MAX)}…` : raw,
+    inline: comment.inline ? { path: comment.inline.path || "", line: comment.inline.to ?? comment.inline.from ?? null } : null
+  };
+}
+
 export function slimPipeline(pipeline, repo) {
   const result = pipeline.state?.result?.name || (pipeline.state?.name && pipeline.state.name !== "COMPLETED" ? pipeline.state.name : "UNKNOWN");
   return {

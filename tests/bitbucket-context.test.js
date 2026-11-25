@@ -1,6 +1,7 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { buildBitbucketContext, serializeBitbucketContext } from "../models/bitbucket-context.js";
+import { COMMENT_TEXT_MAX, slimComment } from "../models/bitbucket.js";
 import { clearSnapshot, loadBitbucketContext, saveSnapshot } from "../models/storage.js";
 
 const originalStorage = globalThis.localStorage;
@@ -67,7 +68,8 @@ test("context keeps analysis data and drops identifiers, links and descriptions"
   assert.equal(context.repositories[0].project_key, "P");
   assert.equal(context.warnings.runners, "sem acesso");
   const text = serializeBitbucketContext(snapshot);
-  for (const leaked of ["secret-uuid", "avatar.example", "user@bitbucket.org", "descrição interna", "{u2}", "{p}", "123"]) {
+  assert.equal(context.pull_requests[0].description, "descrição interna do PR");
+  for (const leaked of ["secret-uuid", "avatar.example", "user@bitbucket.org", "{u2}", "{p}", "123"]) {
     assert.ok(!text.includes(leaked), `vazou: ${leaked}`);
   }
   assert.equal(buildBitbucketContext(null), null);
@@ -92,4 +94,36 @@ test("context is not stored if it contains the access token", () => {
   assert.ok(loadBitbucketContext());
   saveSnapshot({ ...snapshot, pullRequests: [pr(1, "Juliano", { title: "usa tok-123 aqui" })] }, "tok-123");
   assert.equal(loadBitbucketContext(), "");
+});
+
+test("context lists PR comments in order with replies, inline anchors and description", () => {
+  const withComments = {
+    ...snapshot,
+    pullRequests: [{
+      ...snapshot.pullRequests[0],
+      summary: "corpo do PR",
+      comment_count: 2,
+      commentsLoaded: true,
+      commentsTruncated: true,
+      comments: [
+        { id: 1, parent_id: null, author: "Ana", created_on: "2024-01-01", text: "primeiro", inline: { path: "a.js", line: 3 } },
+        { id: 2, parent_id: 1, author: "Juliano", created_on: "2024-01-02", text: "resposta", inline: null }
+      ]
+    }]
+  };
+  const pr = buildBitbucketContext(withComments).pull_requests[0];
+  assert.equal(pr.description, "corpo do PR");
+  assert.equal(pr.comments_loaded, true);
+  assert.equal(pr.comments_truncated, true);
+  assert.deepEqual(pr.comments[0], { author: "Ana", created_on: "2024-01-01", reply_to: null, inline: { path: "a.js", line: 3 }, text: "primeiro" });
+  assert.equal(pr.comments[1].reply_to, 1);
+});
+
+test("slimComment caps long text and keeps reply and inline anchors", () => {
+  const long = "x".repeat(COMMENT_TEXT_MAX + 50);
+  const slim = slimComment({ id: 5, parent: { id: 4 }, user: { display_name: "Ana" }, created_on: "d", content: { raw: long }, inline: { path: "b.js", to: 9 } });
+  assert.equal(slim.text.length, COMMENT_TEXT_MAX + 1);
+  assert.equal(slim.parent_id, 4);
+  assert.deepEqual(slim.inline, { path: "b.js", line: 9 });
+  assert.equal(slimComment({ id: 6, content: { raw: "ok" } }).author, "Desconhecido");
 });

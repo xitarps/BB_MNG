@@ -9,6 +9,7 @@ import {
   slimPullRequest,
   slimRepo,
   slimRunner,
+  slimComment,
   workspaceSlug
 } from "../models/bitbucket.js";
 import { saveConfig, saveSnapshot, saveWorkspaces } from "../models/storage.js";
@@ -32,6 +33,55 @@ function encodeWs(config) {
 }
 
 const PR_FIELDS = encodeURIComponent("+values.reviewers,+values.participants");
+const COMMENT_PR_LIMIT = 100;
+const COMMENTS_PER_PR = 200;
+const COMMENT_BUDGET_CHARS = 400000;
+
+async function commentsFor(client, workspace, pr) {
+  const base = `/2.0/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(pr.repoSlug)}/pullrequests/${encodeURIComponent(pr.id)}/comments`;
+  let page;
+  try {
+    page = await client.list(`${base}?sort=-created_on`, { pagelen: 50, maxPages: 4, maxItems: COMMENTS_PER_PR });
+  } catch (error) {
+    if (error.name === "AbortError" || error.status !== 400) throw error;
+    const all = await client.list(base, { pagelen: 50, maxPages: 4 });
+    page = { values: all.values.slice(-COMMENTS_PER_PR), truncated: all.truncated || all.values.length > COMMENTS_PER_PR };
+  }
+  return { comments: (page.values || []).filter((comment) => !comment.deleted).reverse().map(slimComment), truncated: Boolean(page.truncated) };
+}
+
+// Fills pr.comments for PRs that have comments, keeping the snapshot inside the browser storage budget.
+async function enrichComments(client, workspace, prs) {
+  const candidates = prs.filter((pr) => pr.comment_count > 0 && pr.repoSlug).slice(0, COMMENT_PR_LIMIT);
+  const fetched = await mapPool(candidates, 4, async (pr) => {
+    try {
+      return await commentsFor(client, workspace, pr);
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      return null;
+    }
+  });
+  let used = 0;
+  let skipped = 0;
+  let failed = 0;
+  candidates.forEach((pr, index) => {
+    const result = fetched[index];
+    if (!result) {
+      failed += 1;
+      return;
+    }
+    const size = JSON.stringify(result.comments).length;
+    if (used + size > COMMENT_BUDGET_CHARS) {
+      skipped += 1;
+      return;
+    }
+    used += size;
+    pr.comments = result.comments;
+    pr.commentsTruncated = result.truncated;
+    pr.commentsLoaded = true;
+  });
+  return { failed, skipped, overLimit: Math.max(0, prs.filter((pr) => pr.comment_count > 0).length - candidates.length) };
+}
 
 async function pullRequestsFor(client, workspace, repo, prState) {
   const path = `/2.0/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(repo.slug)}/pullrequests?state=${encodeURIComponent(prState)}&fields=${PR_FIELDS}`;
@@ -167,6 +217,15 @@ export async function syncAll(state, signal, onStatus) {
   }
 
   const pullRequests = [...byKey.values()].sort((a, b) => new Date(b.updated_on) - new Date(a.updated_on));
+  onStatus?.("Lendo comentários dos pull requests…");
+  const commentStats = await enrichComments(client, workspace, pullRequests);
+  if (commentStats.failed || commentStats.skipped || commentStats.overLimit) {
+    const parts = [];
+    if (commentStats.failed) parts.push(`${commentStats.failed} PR(s) sem comentários por erro`);
+    if (commentStats.skipped) parts.push(`${commentStats.skipped} PR(s) fora do limite de armazenamento`);
+    if (commentStats.overLimit) parts.push(`comentários lidos só de ${COMMENT_PR_LIMIT} PRs`);
+    sectionErrors.comments = `Comentários incompletos: ${parts.join("; ")}.`;
+  }
   const probes = [
     { id: "account", label: "Account Read", ok: Boolean(state.user), message: state.user?.display_name || state.userError || "conta não identificada" },
     { id: "projects", label: "Projects Read", ok: !sectionErrors.projects, message: sectionErrors.projects || `${projectsResult.values.length} projetos` },

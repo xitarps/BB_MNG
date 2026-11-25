@@ -7,7 +7,14 @@ function countBy(items, keyOf) {
   return counts;
 }
 
-// Whitelist of non-secret fields: no tokens, avatars, UUIDs, clone links or PR descriptions.
+const DESCRIPTION_MAX = 4000;
+
+function excerpt(text, max) {
+  const value = String(text || "");
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+// Whitelist of non-secret fields: no tokens, avatars, UUIDs or clone links.
 export function buildBitbucketContext(snapshot) {
   if (!snapshot) return null;
   const pullRequests = (snapshot.pullRequests || []).map((pr) => ({
@@ -26,6 +33,16 @@ export function buildBitbucketContext(snapshot) {
     destination_branch: pr.destination,
     reviewers_loaded: Boolean(pr.reviewersLoaded),
     reviewers: (pr.reviewers || []).map((reviewer) => ({ name: reviewer.name, approved: reviewer.approved, state: reviewer.state })),
+    description: excerpt(pr.summary, DESCRIPTION_MAX),
+    comments_loaded: Boolean(pr.commentsLoaded),
+    comments_truncated: Boolean(pr.commentsTruncated),
+    comments: (pr.comments || []).map((comment) => ({
+      author: comment.author,
+      created_on: comment.created_on,
+      reply_to: comment.parent_id,
+      inline: comment.inline,
+      text: comment.text
+    })),
     url: pr.html
   }));
   const repos = snapshot.repos || [];
