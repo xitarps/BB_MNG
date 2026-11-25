@@ -44,8 +44,6 @@ export function renderShell(state, content) {
       </header>
       <div class="content">
         ${hostWarning()}
-        ${state.error ? `<div class="banner danger"><p>${escapeHtml(state.error)}</p></div>` : ""}
-        ${state.notice ? `<div class="banner"><p>${escapeHtml(state.notice)}</p></div>` : ""}
         ${content}
       </div>
     </div>

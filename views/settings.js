@@ -1,4 +1,5 @@
 import { escapeHtml } from "../models/format.js";
+import { PROVIDERS, PROVIDER_IDS } from "../models/ai.js";
 import { JIRA_SCOPES } from "../models/jira-config.js";
 import { DECLARED_SCOPES } from "../models/scopes.js";
 import { pageHead, tag } from "./html.js";
@@ -68,16 +69,35 @@ export function renderSettings(state) {
       ${state.jiraUser ? `<p class="help wide">Conectado ao Jira como ${escapeHtml(state.jiraUser.display_name)}.</p>` : ""}
       <p class="help wide">A consulta precisa de uma restrição (por exemplo, status ou datas): o Jira recusa buscas sem limites. A leitura usa apenas GET e o escopo equivalente a "ler issues e projetos".</p>
     </form>
-    <form class="card form" data-action="save-claude" autocomplete="off">
-      <h2 class="wide">IA pessoal · Claude</h2>
-      <p class="help wide">A chave fica no localStorage deste navegador, acessível a scripts desta origem. Use apenas um computador confiável. As conversas são enviadas diretamente à Anthropic e podem gerar cobrança; não inclua credenciais. O Claude só recebe dados do Bitbucket ou do Jira quando você liga "Anexar contexto" no chat e envia a mensagem; você escolhe, campo a campo, o que anexar antes do envio.</p>
-      <label class="field wide"><span>Chave de API ${state.claude.apiKey ? "— já salva; preencha apenas para substituir" : ""}</span>
-        <input name="apiKey" type="password" placeholder="${state.claude.apiKey ? "chave armazenada neste navegador" : "chave da API Anthropic"}" autocomplete="off" spellcheck="false">
+    <form class="card form" data-action="save-ai" autocomplete="off">
+      <h2 class="wide">IA pessoal</h2>
+      <p class="help wide">As chaves ficam no localStorage deste navegador, acessíveis a scripts desta origem. Use apenas um computador confiável. As conversas são enviadas diretamente ao provedor em uso e podem gerar cobrança; não inclua credenciais. A IA só recebe dados do Bitbucket ou do Jira quando você liga "Anexar contexto" no chat e envia a mensagem; você escolhe, campo a campo, o que anexar antes do envio.</p>
+      <label class="field wide"><span>Provedor em uso (também dá para trocar no cabeçalho do chat)</span>
+        <select name="provider" aria-label="Provedor de IA em uso">${PROVIDER_IDS.map((id) => `<option value="${id}" ${id === state.ai.provider ? "selected" : ""}>${escapeHtml(PROVIDERS[id].label)}</option>`).join("")}</select>
       </label>
-      <label class="field wide"><span>ID do modelo Claude</span><input name="model" value="${escapeHtml(state.claude.model)}" required spellcheck="false" autocomplete="off"></label>
-      <div class="btn-row wide"><button type="submit" class="primary">Salvar IA</button>
-        <button type="button" class="danger" data-action="forget-claude" ${state.claude.apiKey && !state.chat.sending ? "" : "disabled"}>Esquecer chave</button></div>
-      <p class="help wide">Configure uma chave da API Anthropic; a assinatura do aplicativo Claude pode não incluir acesso à API. A conversa permanece apenas nesta página e é perdida ao recarregar.</p>
+      <label class="field wide"><span>Instruções padrão (contexto fixo enviado em todas as mensagens)</span>
+        <textarea name="instructions" rows="5" spellcheck="true" aria-label="Instruções padrão para a IA" placeholder="Ex.: Sempre usar o source_branch no lugar do id quando se tratar de pull requests do Bitbucket.">${escapeHtml(state.ai.instructions)}</textarea>
+        <span class="help">Vão no prompt de sistema do provedor em uso, a cada resposta, sem se repetir no histórico. Até 4.000 caracteres. Não coloque credenciais: o texto é enviado ao provedor. O botão Testar não usa estas instruções.</span>
+      </label>
+      ${PROVIDER_IDS.map((id) => {
+        const provider = PROVIDERS[id];
+        const saved = state.ai.providers[id];
+        return `<fieldset class="ai-provider wide ${id === state.ai.provider ? "active" : ""}">
+          <legend>${escapeHtml(provider.label)}${id === state.ai.provider ? " · em uso" : ""}</legend>
+          <label class="field"><span>Chave de API ${saved.apiKey ? "— já salva; preencha apenas para substituir" : ""}</span>
+            <input name="key-${id}" type="password" placeholder="${saved.apiKey ? "chave armazenada neste navegador" : escapeHtml(provider.keyHint)}" autocomplete="off" spellcheck="false"></label>
+          <label class="field"><span>ID do modelo</span>
+            <input name="model-${id}" list="models-${id}" value="${escapeHtml(saved.model)}" required spellcheck="false" autocomplete="off">
+            <datalist id="models-${id}">${provider.models.map((model) => `<option value="${escapeHtml(model)}"></option>`).join("")}</datalist></label>
+          <p class="help wide">${escapeHtml(provider.help)}</p>
+          <div class="btn-row wide">
+            <button type="button" class="ghost" data-action="test-ai" data-provider="${id}" ${state.chat.sending || state.syncing ? "disabled" : ""}>Testar ${escapeHtml(provider.label)}</button>
+            <button type="button" class="danger" data-action="forget-ai" data-provider="${id}" ${saved.apiKey && !state.chat.sending ? "" : "disabled"}>Esquecer chave do ${escapeHtml(provider.label)}</button>
+          </div>
+        </fieldset>`;
+      }).join("")}
+      <div class="btn-row wide"><button type="submit" class="primary">Salvar IA</button></div>
+      <p class="help wide">A conversa permanece apenas nesta página e é perdida ao recarregar. Ao trocar de provedor, o histórico da conversa atual é reenviado ao novo provedor.</p>
     </form>
     <article class="card">
       <h2>O que este token deve alcançar</h2>

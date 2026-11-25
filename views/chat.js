@@ -1,4 +1,5 @@
 import { escapeHtml } from "../models/format.js";
+import { PROVIDERS, PROVIDER_IDS, activeAi } from "../models/ai.js";
 import { buildContextTree, leavesOf, selectedContextText } from "../models/context-tree.js";
 
 const GROUPED = { grouped: true };
@@ -24,7 +25,7 @@ function renderNodes(nodes, chat) {
   }).join("")}</ul>`;
 }
 
-function contextWindow(chat) {
+function contextWindow(chat, ai) {
   if (!chat.contextData) {
     return `<div class="chat-context"><strong>Contexto</strong>
       <p class="chat-context-note">Não há dados salvos do Bitbucket nem do Jira. Use Atualizar no topo (em cada seção) para carregá-los.</p>
@@ -39,7 +40,7 @@ function contextWindow(chat) {
   if (!open) return `<div class="chat-context collapsed">${head}</div>`;
   return `<div class="chat-context">
     ${head}
-    <p class="chat-context-note">Será enviado à Anthropic com a sua pergunta.</p>
+    <p class="chat-context-note">Será enviado ao provedor de IA em uso (${escapeHtml(ai.label)}) com a sua pergunta.</p>
     <div class="chat-actions ctx-toolbar">
       <button type="button" class="ghost" data-action="ctx-all" ${off}>Marcar tudo</button>
       <button type="button" class="ghost" data-action="ctx-none" ${off}>Desmarcar tudo</button>
@@ -54,34 +55,37 @@ function contextWindow(chat) {
 export function renderChat(state) {
   const chat = state.chat;
   if (!chat.open) {
-    return `<button type="button" class="chat-launcher" data-action="open-chat" aria-label="Abrir chat com Claude" aria-expanded="false">✦ <span>Chat IA</span></button>`;
+    return `<button type="button" class="chat-launcher" data-action="open-chat" aria-label="Abrir chat com a IA" aria-expanded="false">✦ <span>Chat IA</span></button>`;
   }
-  const messages = chat.messages.map((message) => `<div class="chat-message ${message.role === "user" ? "chat-user" : "chat-assistant"}"><strong>${message.role === "user" ? "Você" : "Claude"}</strong><p>${escapeHtml(message.content)}</p>${message.context ? `<small class="chat-attach">Contexto anexado · ${message.context.length.toLocaleString("pt-BR")} caracteres</small>` : ""}</div>`).join("");
+  const ai = activeAi(state.ai);
+  const messages = chat.messages.map((message) => `<div class="chat-message ${message.role === "user" ? "chat-user" : "chat-assistant"}"><strong>${message.role === "user" ? "Você" : escapeHtml(message.provider || "IA")}</strong><p>${escapeHtml(message.content)}</p>${message.context ? `<small class="chat-attach">Contexto anexado · ${message.context.length.toLocaleString("pt-BR")} caracteres</small>` : ""}</div>`).join("");
   const expandedContext = chat.useContext && !chat.contextCollapsed;
   const maxIcon = chat.maximized
     ? `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.5 5.5h8v8h-8zM2.5 10.5v-8h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`
     : `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2.5 2.5h11v11h-11z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
-  return `<section class="chat-panel${expandedContext ? " has-context" : ""}${chat.maximized ? " is-max" : ""}" aria-label="Chat com Claude">
-    <header class="chat-head"><div><strong>Chat IA</strong><span>Claude · dados do Bitbucket e do Jira só se você anexar</span></div>
+  return `<section class="chat-panel${expandedContext ? " has-context" : ""}${chat.maximized ? " is-max" : ""}" aria-label="Chat com IA">
+    <header class="chat-head"><div><strong>Chat IA</strong>
+      <select class="chat-provider" data-action="chat-provider" aria-label="Provedor de IA em uso" ${chat.sending ? "disabled" : ""}>${PROVIDER_IDS.map((id) => `<option value="${id}" ${id === ai.id ? "selected" : ""}>${escapeHtml(PROVIDERS[id].label)}</option>`).join("")}</select>
+      <span>dados do Bitbucket e do Jira só se você anexar</span></div>
       <div class="chat-head-actions">
         <button type="button" class="chat-close" id="chat-maximize" data-action="toggle-chat-maximize" aria-pressed="${Boolean(chat.maximized)}" aria-label="${chat.maximized ? "Restaurar tamanho do chat" : "Maximizar chat"}">${maxIcon}</button>
         <button type="button" class="chat-close" data-action="close-chat" aria-label="Minimizar chat">−</button>
       </div></header>
-    <p class="chat-privacy">As mensagens são enviadas à Anthropic e podem gerar cobrança. Não inclua credenciais.</p>
+    <p class="chat-privacy">As mensagens são enviadas ao provedor em uso (${escapeHtml(ai.label)}) e podem gerar cobrança. Não inclua credenciais.${state.ai.instructions?.trim() ? ` <button type="button" class="linkish" data-route="settings">Instruções padrão ativas</button>.` : ""}</p>
     <div class="chat-messages" role="log" aria-live="polite">
       ${messages || `<p class="chat-empty">Olá! Posso ajudar com perguntas gerais. Para perguntar sobre o Bitbucket ou o Jira, ative "Anexar contexto" abaixo.</p>`}
-      ${chat.sending ? `<p class="chat-empty">Claude está respondendo…</p>` : ""}
+      ${chat.sending ? `<p class="chat-empty">${escapeHtml(ai.label)} está respondendo…</p>` : ""}
     </div>
     ${chat.error ? `<p class="chat-error" role="alert">${escapeHtml(chat.error)}</p>` : ""}
     ${chat.truncated ? `<p class="chat-error">A resposta atingiu o limite de tamanho. Peça para continuar.</p>` : ""}
-    ${!state.claude.apiKey ? `<p class="chat-setup">Configure a chave em <button type="button" class="linkish" data-route="settings">Configuração</button>.</p>` : ""}
-    ${chat.useContext ? contextWindow(chat) : ""}
+    ${!ai.apiKey ? `<p class="chat-setup">Configure a chave do ${escapeHtml(ai.label)} em <button type="button" class="linkish" data-route="settings">Configuração</button>.</p>` : ""}
+    ${chat.useContext ? contextWindow(chat, ai) : ""}
     <form class="chat-compose" data-action="send-chat">
       <label class="chat-switch"><input id="chat-context-toggle" type="checkbox" role="switch" data-action="chat-context-toggle" ${chat.useContext ? "checked" : ""} ${chat.sending ? "disabled" : ""}><span class="chat-switch-track" aria-hidden="true"></span><span>Anexar contexto (Bitbucket / Jira)</span></label>
       <label class="chat-label" for="chat-draft">Mensagem</label>
       <textarea id="chat-draft" data-action="chat-draft" placeholder="Escreva sua mensagem" rows="2" required ${chat.sending ? "disabled" : ""}>${escapeHtml(chat.draft)}</textarea>
       <div class="chat-actions"><button type="button" class="ghost" data-action="clear-chat" ${chat.sending || !chat.messages.length ? "disabled" : ""}>Limpar conversa</button>
-        <button type="submit" class="primary" ${chat.sending || !state.claude.apiKey ? "disabled" : ""}>Enviar</button></div>
+        <button type="submit" class="primary" ${chat.sending || !ai.apiKey ? "disabled" : ""}>Enviar</button></div>
     </form>
   </section>`;
 }

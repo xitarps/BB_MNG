@@ -1,30 +1,61 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_CLAUDE_MODEL, MAX_CONTEXT_CHARS, loadClaudeConfig, saveClaudeConfig, sendClaudeMessage } from "../models/claude.js";
+import { MAX_CONTEXT_CHARS, PROVIDERS, activeAi, defaultAiConfig, loadAiConfig, saveAiConfig, sendAiMessage } from "../models/ai.js";
 import { renderChat } from "../views/chat.js";
 
 const originalFetch = globalThis.fetch;
 const originalStorage = globalThis.localStorage;
-const config = { apiKey: "fake-api-key", model: DEFAULT_CLAUDE_MODEL };
+const withKey = (provider = "claude", apiKey = "fake-api-key") => {
+  const value = defaultAiConfig();
+  value.provider = provider;
+  value.providers[provider].apiKey = apiKey;
+  return value;
+};
+const config = withKey();
+const sendClaudeMessage = (cfg, messages) => sendAiMessage(cfg, messages);
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   globalThis.localStorage = originalStorage;
 });
 
-test("Claude configuration is stored separately and can be forgotten", () => {
-  const storage = new Map();
-  globalThis.localStorage = {
-    getItem: (key) => storage.get(key) ?? null,
-    setItem: (key, value) => storage.set(key, value)
-  };
-  assert.deepEqual(loadClaudeConfig(), { apiKey: "", model: DEFAULT_CLAUDE_MODEL });
-  saveClaudeConfig(config);
-  assert.deepEqual(loadClaudeConfig(), config);
-  saveClaudeConfig({ ...config, apiKey: "" });
-  assert.equal(loadClaudeConfig().apiKey, "");
-  storage.set("crizsopha.claude.config", "invalid");
-  assert.throws(loadClaudeConfig, /Não foi possível ler/);
+function fakeStorage(initial = {}) {
+  const data = new Map(Object.entries(initial));
+  return { data, getItem: (key) => data.get(key) ?? null, setItem: (key, value) => data.set(key, String(value)), removeItem: (key) => data.delete(key) };
+}
+
+test("AI configuration keeps one key and model per provider and the chosen provider", () => {
+  globalThis.localStorage = fakeStorage();
+  assert.deepEqual(loadAiConfig(), defaultAiConfig());
+  assert.equal(defaultAiConfig().provider, "claude");
+  const saved = withKey("deepseek", "ds-key");
+  saved.providers.gemini = { apiKey: "g-key", model: "gemini-4-argon" };
+  saveAiConfig(saved);
+  const loaded = loadAiConfig();
+  assert.equal(loaded.provider, "deepseek");
+  assert.deepEqual(loaded.providers.gemini, { apiKey: "g-key", model: "gemini-4-argon" });
+  assert.equal(loaded.providers.claude.apiKey, "");
+  assert.deepEqual(activeAi(loaded).id, "deepseek");
+  assert.equal(activeAi(loaded).apiKey, "ds-key");
+  globalThis.localStorage.setItem("crizsopha.ai.config", JSON.stringify({ provider: "outro", providers: { gemini: { apiKey: 5 } } }));
+  const sanitized = loadAiConfig();
+  assert.equal(sanitized.provider, "claude", "unknown provider falls back to the default");
+  assert.equal(sanitized.providers.gemini.apiKey, "", "malformed entries are ignored");
+  globalThis.localStorage.setItem("crizsopha.ai.config", "invalid");
+  assert.throws(loadAiConfig, /Não foi possível ler/);
+});
+
+test("the old single-Claude configuration is migrated once and its copy of the key is removed", () => {
+  const storage = fakeStorage({ "crizsopha.claude.config": JSON.stringify({ apiKey: "old-claude-key", model: "claude-sonnet-5-5" }) });
+  globalThis.localStorage = storage;
+  const migrated = loadAiConfig();
+  assert.deepEqual(migrated.providers.claude, { apiKey: "old-claude-key", model: "claude-sonnet-5-5" });
+  assert.equal(migrated.provider, "claude");
+  assert.equal(storage.data.has("crizsopha.claude.config"), false, "the secret is not kept in two places");
+  assert.equal(JSON.parse(storage.data.get("crizsopha.ai.config")).providers.claude.apiKey, "old-claude-key");
+  assert.equal(loadAiConfig().providers.claude.apiKey, "old-claude-key");
+  globalThis.localStorage = fakeStorage({ "crizsopha.claude.config": "not json" });
+  assert.throws(loadAiConfig, /configuração do Claude/);
 });
 
 test("sends only chat messages to Claude and reads its response", async () => {
@@ -38,12 +69,13 @@ test("sends only chat messages to Claude and reads its response", async () => {
     { role: "assistant", content: "Olá!" },
     { role: "user", content: "Ajude-me" }
   ]);
-  assert.deepEqual(result, { text: "Resposta", truncated: false });
+  assert.deepEqual(result, { text: "Resposta", truncated: false, provider: "Claude" });
   assert.equal(request.url, "https://api.anthropic.com/v1/messages");
   assert.equal(request.headers["x-api-key"], "fake-api-key");
   assert.equal(request.headers["anthropic-dangerous-direct-browser-access"], "true");
   const body = JSON.parse(request.body);
   assert.equal(body.max_tokens, 16000);
+  assert.equal(body.model, PROVIDERS.claude.defaultModel);
   assert.deepEqual(body.messages, [
     { role: "user", content: "Olá" },
     { role: "assistant", content: "Olá!" },
@@ -55,25 +87,27 @@ test("sends only chat messages to Claude and reads its response", async () => {
 });
 
 test("reports provider errors and malformed or truncated responses", async () => {
-  globalThis.fetch = async () => ({ ok: false, status: 401 });
+  globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: { message: "invalid x-api-key" } }) });
   await assert.rejects(sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), /recusou a chave/);
+  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => { throw new Error("not json"); } });
+  await assert.rejects(sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), /erro HTTP 500/);
   globalThis.fetch = async () => ({ ok: true, json: async () => null });
   await assert.rejects(sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), /sem conteúdo/);
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ content: [null, { type: "text", text: "Texto" }], stop_reason: "max_tokens" }) });
-  assert.deepEqual(await sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), { text: "Texto", truncated: true });
+  assert.deepEqual(await sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), { text: "Texto", truncated: true, provider: "Claude" });
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ content: [{ type: "thinking", thinking: "..." }], stop_reason: "max_tokens" }) });
   await assert.rejects(sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), /esgotou o limite de tokens raciocinando/);
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ content: [], stop_reason: "refusal" }) });
   await assert.rejects(sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), /recusou/);
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ content: [], stop_reason: "end_turn" }) });
   await assert.rejects(sendClaudeMessage(config, [{ role: "user", content: "Olá" }]), /motivo: end_turn/);
-  await assert.rejects(sendClaudeMessage({ ...config, apiKey: "" }, [{ role: "user", content: "Olá" }]), /Configure a chave/);
+  await assert.rejects(sendClaudeMessage(defaultAiConfig(), [{ role: "user", content: "Olá" }]), /Configure a chave do Claude/);
 });
 
 test("chat escapes messages and shows the context tree only when the switch is on", () => {
   const data = { pull_requests: [{ title: "</textarea><b>x</b>", author: "Ana" }], runners: [] };
   const state = {
-    claude: config,
+    ai: config,
     chat: { open: true, messages: [{ role: "assistant", content: "<img src=x onerror=alert(1)>" }], draft: "</textarea>", error: "", sending: false, truncated: false, useContext: false, contextData: data, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false }
   };
   let html = renderChat(state);
@@ -132,7 +166,7 @@ test("chat escapes messages and shows the context tree only when the switch is o
   assert.match(renderChat(state), /Não há dados salvos do Bitbucket nem do Jira/);
 
   state.chat.open = false;
-  assert.match(renderChat(state), /Abrir chat com Claude/);
+  assert.match(renderChat(state), /Abrir chat com a IA/);
 });
 
 test("with the switch left on, only the latest attached context is sent", async () => {

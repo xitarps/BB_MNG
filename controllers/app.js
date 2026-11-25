@@ -2,7 +2,8 @@ import { destinationFor, normalizeWorkspace, validateConfig, clampInt, cleanToke
 import { explainError, createClient, slimPullRequest } from "../models/bitbucket.js";
 import { buildClonePlan } from "../models/clone-script.js";
 import { buildUpdatePlan } from "../models/update-script.js";
-import { DEFAULT_CLAUDE_MODEL, MAX_CONTEXT_CHARS, loadClaudeConfig, saveClaudeConfig, sendClaudeMessage } from "../models/claude.js";
+import { MAX_CONTEXT_CHARS, MAX_INSTRUCTIONS, PROVIDER_IDS, PROVIDERS, defaultAiConfig, loadAiConfig, normalizeModel, saveAiConfig, sendAiMessage, testAiProvider } from "../models/ai.js";
+import { showToast } from "../views/toast.js";
 import { buildBitbucketContext } from "../models/bitbucket-context.js";
 import { buildContextTree, findNode, leavesOf, selectedContextText } from "../models/context-tree.js";
 import { filterRepos } from "../models/metrics.js";
@@ -41,13 +42,13 @@ const SOURCE_PREFIX = /^(bitbucket|jira)\./;
 // Exclusions saved before the Jira groups existed referred to Bitbucket fields without the group prefix.
 const savedExclusions = loadContextExcluded().map((path) => (SOURCE_PREFIX.test(path) ? path : `bitbucket.${path}`));
 
-let claudeConfig;
-let claudeConfigError = "";
+let aiConfig;
+let aiConfigError = "";
 try {
-  claudeConfig = loadClaudeConfig();
+  aiConfig = loadAiConfig();
 } catch (error) {
-  claudeConfig = { apiKey: "", model: DEFAULT_CLAUDE_MODEL };
-  claudeConfigError = error.message;
+  aiConfig = defaultAiConfig();
+  aiConfigError = error.message;
 }
 
 const state = {
@@ -62,10 +63,10 @@ const state = {
   jiraUser: loadJiraSnapshot()?.user || null,
   syncing: false,
   statusText: "",
-  error: claudeConfigError,
+  error: aiConfigError,
   notice: "",
   abort: null,
-  claude: claudeConfig,
+  ai: aiConfig,
   chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(savedExclusions), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false },
   ui: {
     prQuery: "",
@@ -129,6 +130,16 @@ function render({ keepScroll = false } = {}) {
     if (selection) nextFocus.setSelectionRange(...selection);
   }
   ensureReviewers();
+  flushMessages();
+}
+
+// Errors and notices set anywhere in the controller become floating toasts, visible wherever the page is scrolled.
+function flushMessages() {
+  const { error, notice } = state;
+  state.error = "";
+  state.notice = "";
+  if (error) showToast("error", error);
+  if (notice) showToast("notice", notice);
 }
 
 let reviewersJob = null;
@@ -215,6 +226,40 @@ function readJiraForm() {
   return state.jiraConfig;
 }
 
+// Reads the AI form and saves it. Returns a problem description, or "" when it was saved.
+function readAiForm({ applyProvider }) {
+  const form = document.querySelector("form[data-action='save-ai']");
+  if (!form) return "";
+  const data = new FormData(form);
+  const provider = applyProvider && PROVIDER_IDS.includes(data.get("provider")) ? data.get("provider") : state.ai.provider;
+  const providers = {};
+  const instructions = String(data.get("instructions") ?? state.ai.instructions ?? "").trim();
+  let problem = "";
+  if (instructions.length > MAX_INSTRUCTIONS) problem = `As instruções padrão passam de ${MAX_INSTRUCTIONS.toLocaleString("pt-BR")} caracteres (${instructions.length.toLocaleString("pt-BR")}). Reduza o texto.`;
+  for (const id of PROVIDER_IDS) {
+    const model = normalizeModel(data.get(`model-${id}`)) || PROVIDERS[id].defaultModel;
+    const apiKey = String(data.get(`key-${id}`) || "").trim() || state.ai.providers[id].apiKey;
+    if (!/^[a-zA-Z0-9._-]{1,128}$/.test(model)) problem ||= `Confira o ID do modelo do ${PROVIDERS[id].label}.`;
+    if (/[\r\n]/.test(apiKey)) problem ||= `Confira a chave de API do ${PROVIDERS[id].label}.`;
+    providers[id] = { apiKey, model };
+  }
+  if (!problem) {
+    try {
+      const config = { provider, instructions, providers };
+      saveAiConfig(config);
+      state.ai = config;
+      state.error = "";
+    } catch (error) {
+      problem = "Não foi possível salvar a configuração da IA neste navegador.";
+    }
+  }
+  if (problem) {
+    state.error = problem;
+    state.notice = "";
+  }
+  return problem;
+}
+
 async function runTask(label, task) {
   state.abort?.abort();
   const abort = new AbortController();
@@ -231,8 +276,10 @@ async function runTask(label, task) {
       if (el) el.textContent = text;
     });
   } catch (error) {
-    if (error.name !== "AbortError") state.error = explainError(error);
-    else state.statusText = "Consulta cancelada.";
+    if (error.name !== "AbortError") {
+      state.error = explainError(error);
+      state.statusText = "A consulta falhou.";
+    } else state.statusText = "Consulta cancelada.";
   } finally {
     state.syncing = false;
     if (state.abort === abort) state.abort = null;
@@ -369,8 +416,8 @@ async function sendChat() {
     render({ keepScroll: true });
     return;
   }
-  if ([state.config.token, state.jiraConfig.token, state.claude.apiKey].some((secret) => secret && (text.includes(secret) || context.includes(secret)))) {
-    chat.error = "A mensagem ou o contexto contém uma credencial configurada. Remova-a antes de enviar.";
+  if ([state.config.token, state.jiraConfig.token, ...PROVIDER_IDS.map((id) => state.ai.providers[id].apiKey)].some((secret) => secret && (text.includes(secret) || context.includes(secret) || state.ai.instructions.includes(secret)))) {
+    chat.error = "A mensagem, o contexto ou as instruções padrão contêm uma credencial configurada. Remova-a antes de enviar.";
     render({ keepScroll: true });
     return;
   }
@@ -381,8 +428,8 @@ async function sendChat() {
   chat.sending = true;
   render({ keepScroll: true });
   try {
-    const result = await sendClaudeMessage(state.claude, chat.messages);
-    chat.messages.push({ role: "assistant", content: result.text });
+    const result = await sendAiMessage(state.ai, chat.messages);
+    chat.messages.push({ role: "assistant", content: result.text, provider: result.provider });
     chat.truncated = result.truncated;
   } catch (error) {
     chat.messages.pop();
@@ -480,16 +527,33 @@ document.body.addEventListener("click", (event) => {
     state.chat.error = "";
     state.chat.truncated = false;
     render({ keepScroll: true });
-  } else if (action === "forget-claude") {
+  } else if (action === "test-ai") {
+    const id = source.dataset.provider;
+    if (!PROVIDER_IDS.includes(id) || state.chat.sending) return;
+    if (readAiForm({ applyProvider: false })) {
+      render({ keepScroll: true });
+      return;
+    }
+    runTask(`Testando ${PROVIDERS[id].label}…`, async (signal, setStatus) => {
+      const result = await testAiProvider(state.ai, id, signal);
+      setStatus(`${result.label} respondeu.`);
+      const seconds = (result.ms / 1000).toLocaleString("pt-BR", { maximumFractionDigits: 1 });
+      state.notice = result.answered
+        ? `${result.label} está funcionando: a chave e o modelo ${result.model} foram aceitos (${seconds} s).`
+        : `${result.label} aceitou a chave e o modelo ${result.model} (${seconds} s). O modelo gastou o limite do teste pensando, o que é normal em modelos de raciocínio.`;
+    });
+  } else if (action === "forget-ai") {
     if (state.chat.sending) return;
-    const config = { ...state.claude, apiKey: "" };
+    const id = source.dataset.provider;
+    if (!PROVIDER_IDS.includes(id)) return;
+    const config = { ...state.ai, providers: { ...state.ai.providers, [id]: { ...state.ai.providers[id], apiKey: "" } } };
     try {
-      saveClaudeConfig(config);
-      state.claude = config;
-      state.notice = "Chave do Claude apagada deste navegador.";
+      saveAiConfig(config);
+      state.ai = config;
+      state.notice = `Chave do ${PROVIDERS[id].label} apagada deste navegador.`;
       state.error = "";
     } catch (error) {
-      state.error = "Não foi possível apagar a chave do Claude no navegador.";
+      state.error = `Não foi possível apagar a chave do ${PROVIDERS[id].label} no navegador.`;
     }
     render({ keepScroll: true });
   } else if (action === "sync") {
@@ -679,6 +743,19 @@ document.body.addEventListener("change", (event) => {
     render({ keepScroll: true });
     return;
   }
+  if (target.dataset.action === "chat-provider") {
+    if (state.chat.sending || !PROVIDER_IDS.includes(target.value)) return;
+    const config = { ...state.ai, provider: target.value };
+    try {
+      saveAiConfig(config);
+      state.ai = config;
+      state.chat.error = "";
+    } catch (error) {
+      state.chat.error = "Não foi possível salvar o provedor escolhido neste navegador.";
+    }
+    render({ keepScroll: true });
+    return;
+  }
   if (target.dataset.action === "chat-context-toggle") {
     state.chat.useContext = target.checked;
     state.chat.contextCollapsed = false;
@@ -732,25 +809,10 @@ document.body.addEventListener("submit", (event) => {
     render({ keepScroll: true });
     return;
   }
-  if (form.dataset.action === "save-claude") {
+  if (form.dataset.action === "save-ai") {
     event.preventDefault();
-    const data = new FormData(form);
-    const model = String(data.get("model") || "").trim();
-    const apiKey = String(data.get("apiKey") || "").trim() || state.claude.apiKey;
-    if (!/^[a-zA-Z0-9._-]{1,128}$/.test(model) || /[\r\n]/.test(apiKey)) {
-      state.error = "Confira o ID do modelo e a chave da API do Claude.";
-      state.notice = "";
-    } else {
-      try {
-        saveClaudeConfig({ model, apiKey });
-        state.claude = { model, apiKey };
-        state.error = "";
-        state.notice = "Configuração do Claude salva neste navegador.";
-      } catch (error) {
-        state.error = "Não foi possível salvar a configuração do Claude neste navegador.";
-        state.notice = "";
-      }
-    }
+    const problem = readAiForm({ applyProvider: true });
+    if (!problem) state.notice = `Configuração da IA salva neste navegador. Em uso: ${PROVIDERS[state.ai.provider].label}.`;
     render({ keepScroll: true });
     return;
   }
