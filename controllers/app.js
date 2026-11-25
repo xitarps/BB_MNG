@@ -825,6 +825,13 @@ document.body.addEventListener("submit", (event) => {
   render();
 });
 
+document.body.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  if (event.target.dataset?.action !== "chat-draft") return;
+  event.preventDefault();
+  event.target.form?.requestSubmit();
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || !state.ui.commentsOpen) return;
   state.ui.commentsOpen = false;
