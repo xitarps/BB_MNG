@@ -193,6 +193,10 @@ tr.selected td { background: #f3f8df; }
 .chat-assistant { align-self: flex-start; }
 .chat-error, .chat-setup { margin: 0; padding: 6px 14px; font-size: 0.82rem; }
 .chat-error { color: var(--danger); }
+.chat-confirm { margin: 6px 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid #d9a400; border-radius: 6px; background: #fffbea; font-size: 0.85rem; }
+.chat-confirm p { margin: 4px 0; }
+.chat-confirm ul, .chat-activity { margin: 4px 0; padding-left: 18px; font-size: 0.8rem; color: var(--muted); }
+.chat-confirm .chat-actions { justify-content: flex-end; }
 .chat-compose { border-top: 1px solid var(--line); padding: 10px 14px 14px; }
 .chat-label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; }
 .chat-compose textarea { width: 100%; resize: vertical; max-height: 100px; font-family: inherit; }

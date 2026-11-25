@@ -4,7 +4,8 @@
 The browser normally calls https://api.bitbucket.org directly.
 If that is blocked, the page retries /bitbucket/* on this process.
 Jira Cloud does not allow browser calls (no CORS), so /jira/<site>.atlassian.net/rest/*
-is always forwarded here. Only GET, only *.atlassian.net, no redirects.
+is forwarded here. Reads (GET) go to any /rest/ path. Writes (POST/PUT) only to the
+issue routes listed in JIRA_WRITES. Only *.atlassian.net, no redirects.
 Tokens are forwarded and never written to disk or to the log.
 """
 
@@ -22,6 +23,14 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("CRIZSOPHA_PORT", "8765"))
 UPSTREAM = "https://api.bitbucket.org"
 JIRA_HOST = re.compile(r"^[a-z0-9][a-z0-9-]*\.atlassian\.net$")
+# Issue writes the app performs after the user confirms them. Anything else is refused.
+JIRA_WRITES = (
+    ("POST", re.compile(r"^/rest/api/3/issue$")),
+    ("PUT", re.compile(r"^/rest/api/3/issue/[A-Z][A-Z0-9_]*-[0-9]+$")),
+    ("POST", re.compile(r"^/rest/api/3/issue/[A-Z][A-Z0-9_]*-[0-9]+/(comment|transitions)$")),
+    ("PUT", re.compile(r"^/rest/api/3/issue/[A-Z][A-Z0-9_]*-[0-9]+/assignee$")),
+)
+MAX_BODY = 256 * 1024
 ALLOWED = {".html", ".css", ".js", ".svg", ".json", ".ico", ".txt"}
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -43,12 +52,16 @@ class NoRedirect(HTTPRedirectHandler):
 JIRA_OPENER = build_opener(NoRedirect)
 
 
-def jira_upstream(path):
-    """Map /jira/<host>/rest/... to the Jira Cloud URL, or None if it is not allowed."""
+def jira_upstream(method, path):
+    """Map /jira/<host>/rest/... to the Jira Cloud URL, or None if this method and path are not allowed."""
     host, _, tail = path[len("/jira/"):].partition("/")
     if not JIRA_HOST.match(host) or not tail.startswith("rest/"):
         return None
-    return "https://%s/%s" % (host, tail)
+    if method == "GET":
+        return "https://%s/%s" % (host, tail)
+    if any(method == allowed and pattern.match("/" + tail) for allowed, pattern in JIRA_WRITES):
+        return "https://%s/%s" % (host, tail)
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -62,6 +75,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._route(head=False)
+
+    def do_POST(self):
+        self._route(head=False, method="POST")
+
+    def do_PUT(self):
+        self._route(head=False, method="PUT")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -83,30 +102,45 @@ class Handler(BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(data)
 
-    def _route(self, head):
+    def _route(self, head, method="GET"):
         path = self.path.split("?", 1)[0]
+        if path == "/jira" or path.startswith("/jira/"):
+            self._jira(head, method)
+            return
+        if method != "GET":
+            self._send(405, b'{"error":{"message":"metodo nao permitido"}}', "application/json", head)
+            return
         if path == "/health":
             self._send(200, b'{"ok":true,"service":"crizsopha"}', "application/json", head)
             return
         if path == "/bitbucket" or path.startswith("/bitbucket/"):
             self._proxy(head)
             return
-        if path == "/jira" or path.startswith("/jira/"):
-            self._jira(head)
-            return
         self._static(path, head)
 
-    def _jira(self, head):
-        upstream = jira_upstream(self.path) if self.path.startswith("/jira/") else None
+    def _jira(self, head, method):
+        upstream = jira_upstream(method, self.path) if self.path.startswith("/jira/") else None
+        body = None
+        if method != "GET" and upstream:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                self.close_connection = True
+                self._send(413, b'{"error":{"message":"corpo grande demais"}}', "application/json", head)
+                return
+            body = self.rfile.read(length) if length else b""
         if not upstream:
+            if method != "GET":
+                self.close_connection = True
             self._send(400, b'{"error":{"message":"caminho invalido"}}', "application/json", head)
             return
         headers = {"Accept": "application/json", "User-Agent": "crizsopha-local"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         auth = self.headers.get("Authorization")
         if auth:
             headers["Authorization"] = auth
         try:
-            request = Request(upstream, headers=headers, method="GET")
+            request = Request(upstream, data=body, headers=headers, method=method)
             with JIRA_OPENER.open(request, timeout=60) as response:
                 self._send(response.status, response.read(), response.headers.get("Content-Type", "application/json"), head)
         except HTTPError as error:

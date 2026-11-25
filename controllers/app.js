@@ -2,7 +2,9 @@ import { destinationFor, normalizeWorkspace, validateConfig, clampInt, cleanToke
 import { explainError, createClient, slimPullRequest } from "../models/bitbucket.js";
 import { buildClonePlan } from "../models/clone-script.js";
 import { buildUpdatePlan } from "../models/update-script.js";
-import { MAX_CONTEXT_CHARS, MAX_INSTRUCTIONS, PROVIDER_IDS, PROVIDERS, defaultAiConfig, loadAiConfig, normalizeModel, saveAiConfig, sendAiMessage, testAiProvider } from "../models/ai.js";
+import { MAX_CONTEXT_CHARS, MAX_INSTRUCTIONS, PROVIDER_IDS, PROVIDERS, defaultAiConfig, loadAiConfig, normalizeModel, saveAiConfig, testAiProvider } from "../models/ai.js";
+import { AgentRun } from "../models/chat-agent.js";
+import { JiraClient } from "../models/jira.js";
 import { showToast } from "../views/toast.js";
 import { buildBitbucketContext } from "../models/bitbucket-context.js";
 import { buildContextTree, findNode, leavesOf, selectedContextText } from "../models/context-tree.js";
@@ -67,7 +69,7 @@ const state = {
   notice: "",
   abort: null,
   ai: aiConfig,
-  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(savedExclusions), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false },
+  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(savedExclusions), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false, run: null, pending: null, activity: [] },
   ui: {
     prQuery: "",
     prAuthor: "",
@@ -425,20 +427,66 @@ async function sendChat() {
   chat.draft = "";
   chat.error = "";
   chat.truncated = false;
+  chat.pending = null;
+  chat.activity = [];
+  chat.sending = true;
+  render({ keepScroll: true });
+  let run = null;
+  try {
+    run = new AgentRun({ config: state.ai, messages: chat.messages, jira: chatJiraClient(), onActivity: addChatActivity });
+    chat.run = run;
+    applyChatOutcome(await run.start());
+  } catch (error) {
+    // Before the first model call succeeds nothing ran, so the message goes back to the draft; later failures keep it because Jira may already have changed.
+    if (!run || run.steps <= 1) {
+      chat.messages.pop();
+      chat.draft = text;
+    }
+    chat.run = null;
+    chat.error = error.message;
+  } finally {
+    if (!chat.pending) chat.sending = false;
+    render({ keepScroll: true });
+  }
+}
+
+async function confirmChatAction(approved) {
+  const chat = state.chat;
+  if (!chat.run || !chat.pending) return;
+  chat.pending = null;
+  chat.error = "";
   chat.sending = true;
   render({ keepScroll: true });
   try {
-    const result = await sendAiMessage(state.ai, chat.messages);
-    chat.messages.push({ role: "assistant", content: result.text, provider: result.provider });
-    chat.truncated = result.truncated;
+    applyChatOutcome(await chat.run.confirm(approved));
   } catch (error) {
-    chat.messages.pop();
-    chat.draft = text;
+    chat.run = null;
     chat.error = error.message;
   } finally {
-    chat.sending = false;
+    if (!chat.pending) chat.sending = false;
     render({ keepScroll: true });
   }
+}
+
+function applyChatOutcome(outcome) {
+  const chat = state.chat;
+  if (outcome.pending) {
+    chat.pending = outcome.pending;
+    return;
+  }
+  chat.messages.push({ role: "assistant", content: outcome.text, provider: PROVIDERS[outcome.provider].label });
+  chat.truncated = outcome.truncated;
+  chat.run = null;
+}
+
+function addChatActivity(line) {
+  state.chat.activity.push(line);
+  render({ keepScroll: true });
+}
+
+// The assistant can manage Jira whenever the Jira connection is configured, even when the context switch is off.
+function chatJiraClient() {
+  return validateJiraConfig(state.jiraConfig) ? null : new JiraClient(state.jiraConfig);
 }
 
 function addManualRepo() {
@@ -521,6 +569,8 @@ document.body.addEventListener("click", (event) => {
       return;
     }
     download("contexto-bitbucket.json", JSON.stringify(data, null, 2), "json");
+  } else if (action === "confirm-chat-action") {
+    confirmChatAction(source.dataset.approved === "true");
   } else if (action === "clear-chat") {
     if (state.chat.sending) return;
     state.chat.messages = [];

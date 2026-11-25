@@ -47,8 +47,29 @@ test("the Jira route only forwards https *.atlassian.net /rest/ paths", async ()
       const response = await fetch(`${proxy.base}${path}`);
       assert.equal(response.status, 400, path);
     }
-    const post = await fetch(`${proxy.base}/jira/acme.atlassian.net/rest/api/3/myself`, { method: "POST" });
-    assert.notEqual(post.status, 200, "only GET is supported");
+  } finally {
+    proxy.stop();
+  }
+});
+
+test("Jira writes are limited to the issue routes the app uses", async () => {
+  const proxy = await startProxy();
+  try {
+    const refused = [
+      ["POST", "/jira/acme.atlassian.net/rest/api/3/myself"],
+      ["POST", "/jira/acme.atlassian.net/rest/api/3/issue/PROJ-1/attachments"],
+      ["POST", "/jira/acme.atlassian.net/rest/api/3/issue/proj-1/comment"],
+      ["PUT", "/jira/acme.atlassian.net/rest/api/3/issue/PROJ-1/comment"],
+      ["DELETE", "/jira/acme.atlassian.net/rest/api/3/issue/PROJ-1"],
+      ["POST", "/jira/evil.com/rest/api/3/issue"]
+    ];
+    for (const [method, path] of refused) {
+      const response = await fetch(`${proxy.base}${path}`, { method, body: "{}" });
+      assert.ok([400, 405, 501].includes(response.status), `${method} ${path} -> ${response.status}`);
+    }
+    // An allowed write is forwarded upstream. Offline it fails with 502, never with 400/405.
+    const allowed = await fetch(`${proxy.base}/jira/acme.atlassian.net/rest/api/3/issue/PROJ-1/comment`, { method: "POST", body: "{}" });
+    assert.ok(![400, 405].includes(allowed.status), `allowed write -> ${allowed.status}`);
   } finally {
     proxy.stop();
   }

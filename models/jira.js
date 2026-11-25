@@ -34,15 +34,22 @@ export class JiraClient {
     this.signal = signal;
   }
 
-  async get(path) {
+  get(path) {
+    return this.request("GET", path);
+  }
+
+  async request(method, path, body) {
     if (!/^https?:$/.test(location.protocol)) {
       throw failure("O Jira só responde pelo servidor local. Abra o painel por iniciar.bat ou iniciar.sh em http://127.0.0.1:8765.");
     }
+    const headers = { Accept: "application/json", Authorization: this.header };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
     let response;
     try {
       response = await fetch(`${location.origin}/jira/${this.host}${path}`, {
-        method: "GET",
-        headers: { Accept: "application/json", Authorization: this.header },
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
         signal: this.signal,
         credentials: "omit",
         cache: "no-store",
@@ -67,12 +74,40 @@ export class JiraClient {
       const hint = [403, 404].includes(response.status) ? ` (consulta: ${where})` : "";
       throw failure(`${explainStatus(response.status, responseMessage(data))}${hint}`, { status: response.status });
     }
-    if (data === null) throw failure("O Jira devolveu uma resposta que não é JSON. Confira o endereço do site.");
+    // Jira answers writes with 201/204 and no body.
+    if (data === null && method === "GET") throw failure("O Jira devolveu uma resposta que não é JSON. Confira o endereço do site.");
     return data;
   }
 
   myself() {
     return this.get("/rest/api/3/myself");
+  }
+
+  createIssue(fields) {
+    return this.request("POST", "/rest/api/3/issue", { fields });
+  }
+
+  updateIssue(key, { fields, update }) {
+    const body = {};
+    if (fields) body.fields = fields;
+    if (update) body.update = update;
+    return this.request("PUT", `/rest/api/3/issue/${key}`, body);
+  }
+
+  addComment(key, body) {
+    return this.request("POST", `/rest/api/3/issue/${key}/comment`, { body });
+  }
+
+  transitions(key) {
+    return this.get(`/rest/api/3/issue/${key}/transitions`);
+  }
+
+  transition(key, id) {
+    return this.request("POST", `/rest/api/3/issue/${key}/transitions`, { transition: { id } });
+  }
+
+  setAssignee(key, accountId) {
+    return this.request("PUT", `/rest/api/3/issue/${key}/assignee`, { accountId });
   }
 
   async projects({ maxPages = 10 } = {}) {

@@ -52,6 +52,16 @@ function contextWindow(chat, ai) {
   </div>`;
 }
 
+function confirmCard(pending) {
+  return `<section class="chat-confirm" role="alertdialog" aria-labelledby="chat-confirm-title" aria-describedby="chat-confirm-lines">
+    <strong id="chat-confirm-title">Confirmar ação no Jira?</strong>
+    <p>${escapeHtml(pending.title)}</p>
+    <ul id="chat-confirm-lines">${pending.lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+    <div class="chat-actions"><button type="button" class="ghost" data-action="confirm-chat-action" data-approved="false">Cancelar</button>
+      <button type="button" class="primary" data-action="confirm-chat-action" data-approved="true">Confirmar</button></div>
+  </section>`;
+}
+
 export function renderChat(state) {
   const chat = state.chat;
   if (!chat.open) {
@@ -74,8 +84,10 @@ export function renderChat(state) {
     <p class="chat-privacy">As mensagens são enviadas ao provedor em uso (${escapeHtml(ai.label)}) e podem gerar cobrança. Não inclua credenciais.${state.ai.instructions?.trim() ? ` <button type="button" class="linkish" data-route="settings">Instruções padrão ativas</button>.` : ""}</p>
     <div class="chat-messages" role="log" aria-live="polite">
       ${messages || `<p class="chat-empty">Olá! Posso ajudar com perguntas gerais. Para perguntar sobre o Bitbucket ou o Jira, ative "Anexar contexto" abaixo.</p>`}
-      ${chat.sending ? `<p class="chat-empty">${escapeHtml(ai.label)} está respondendo…</p>` : ""}
+      ${chat.sending && !chat.pending ? `<p class="chat-empty">${escapeHtml(ai.label)} está respondendo…</p>` : ""}
+      ${chat.sending && chat.activity.length ? `<ul class="chat-activity" aria-label="Atividade do assistente">${chat.activity.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>` : ""}
     </div>
+    ${chat.pending ? confirmCard(chat.pending) : ""}
     ${chat.error ? `<p class="chat-error" role="alert">${escapeHtml(chat.error)}</p>` : ""}
     ${chat.truncated ? `<p class="chat-error">A resposta atingiu o limite de tamanho. Peça para continuar.</p>` : ""}
     ${!ai.apiKey ? `<p class="chat-setup">Configure a chave do ${escapeHtml(ai.label)} em <button type="button" class="linkish" data-route="settings">Configuração</button>.</p>` : ""}

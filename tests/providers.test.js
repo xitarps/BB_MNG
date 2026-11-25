@@ -275,7 +275,7 @@ test("model ids are normalized and validated before use", async () => {
 });
 
 test("chat header and settings let the user pick the provider", () => {
-  const chat = { open: true, messages: [{ role: "assistant", content: "oi", provider: "DeepSeek" }], draft: "", error: "", sending: false, truncated: false, useContext: false, contextData: null, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false };
+  const chat = { open: true, messages: [{ role: "assistant", content: "oi", provider: "DeepSeek" }], draft: "", error: "", sending: false, truncated: false, useContext: false, contextData: null, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false, activity: [], pending: null };
   const state = { ai: withKey("gemini", "k"), chat, config: { token: "" }, jiraConfig: { site: "", email: "", token: "", projects: "", scope: "open", maxIssues: 300, jql: "" } };
   let html = renderChat(state);
   assert.match(html, /<select class="chat-provider" data-action="chat-provider"/);
