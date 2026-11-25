@@ -108,7 +108,7 @@ test("chat escapes messages and shows the context tree only when the switch is o
   const data = { pull_requests: [{ title: "</textarea><b>x</b>", author: "Ana" }], runners: [] };
   const state = {
     ai: config,
-    chat: { open: true, messages: [{ role: "assistant", content: "<img src=x onerror=alert(1)>" }], draft: "</textarea>", error: "", sending: false, truncated: false, useContext: false, contextData: data, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false }
+    chat: { open: true, messages: [{ role: "assistant", content: "<img src=x onerror=alert(1)>" }], draft: "</textarea>", error: "", sending: false, truncated: false, useContext: false, contextData: data, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false, attachments: [] }
   };
   let html = renderChat(state);
   assert.match(html, /só se você anexar/);

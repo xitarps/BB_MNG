@@ -1,3 +1,5 @@
+import { IMAGE_TYPES, MAX_CONVERSATION_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE } from "./chat-images.js";
+
 const CONFIG_KEY = "crizsopha.ai.config";
 const LEGACY_CLAUDE_KEY = "crizsopha.claude.config";
 export const MAX_CONTEXT_CHARS = 600000;
@@ -9,6 +11,7 @@ const MODEL_ID = /^[a-zA-Z0-9._-]{1,128}$/;
 export const PROVIDERS = {
   claude: {
     label: "Claude",
+    images: true,
     who: "A Anthropic",
     defaultModel: "claude-haiku-5-5",
     models: ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
@@ -17,6 +20,7 @@ export const PROVIDERS = {
   },
   openai: {
     label: "ChatGPT (OpenAI)",
+    images: true,
     who: "A OpenAI",
     defaultModel: "gpt-6-luna",
     models: ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"],
@@ -25,6 +29,7 @@ export const PROVIDERS = {
   },
   gemini: {
     label: "Google AI Studio",
+    images: true,
     who: "O Google",
     defaultModel: "gemini-4-hydrogen",
     models: ["gemini-4-hydrogen", "gemini-4-argon", "gemini-4-neon", "gemini-4-carbon"],
@@ -33,6 +38,7 @@ export const PROVIDERS = {
   },
   deepseek: {
     label: "DeepSeek",
+    images: false,
     who: "A DeepSeek",
     defaultModel: "deepseek-flash",
     models: ["deepseek-flash", "deepseek-v4-pro"],
@@ -86,6 +92,15 @@ function geminiSchema(parameters) {
   if (!Object.keys(parameters.properties || {}).length) return undefined;
   return parameters.required?.length ? parameters : { type: parameters.type, properties: parameters.properties };
 }
+
+// Images go before the text in every provider's user turn, so the question reads after what it refers to.
+const claudeContent = (turn) => (turn.images?.length
+  ? [...turn.images.map((image) => ({ type: "image", source: { type: "base64", media_type: image.mime, data: image.data } })), { type: "text", text: turn.content }]
+  : turn.content);
+const openaiContent = (turn) => (turn.images?.length
+  ? [{ type: "input_text", text: turn.content }, ...turn.images.map((image) => ({ type: "input_image", image_url: `data:${image.mime};base64,${image.data}` }))]
+  : turn.content);
+const geminiParts = (turn) => [...(turn.images || []).map((image) => ({ inline_data: { mime_type: image.mime, data: image.data } })), { text: turn.content }];
 
 function apiContent(message) {
   if (!message.context) return message.content;
@@ -228,7 +243,7 @@ const ADAPTERS = {
       model,
       max_tokens: maxTokens,
       system,
-      messages: flatTurns(turns, (turn) => ({ role: turn.role, content: turn.content })),
+      messages: flatTurns(turns, (turn) => ({ role: turn.role, content: claudeContent(turn) })),
       ...(tools.length ? { tools: tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) } : {})
     }),
     results: (calls, outputs) => [{
@@ -244,7 +259,7 @@ const ADAPTERS = {
     body: (model, system, turns, maxTokens, tools) => ({
       model,
       instructions: system,
-      input: flatTurns(turns, (turn) => ({ role: turn.role, content: turn.content })),
+      input: flatTurns(turns, (turn) => ({ role: turn.role, content: openaiContent(turn) })),
       max_output_tokens: maxTokens,
       store: false,
       ...(tools.length ? { tools: tools.map((tool) => ({ type: "function", name: tool.name, description: tool.description, parameters: tool.parameters })), include: ["reasoning.encrypted_content"] } : {})
@@ -257,7 +272,7 @@ const ADAPTERS = {
     headers: (key) => ({ "content-type": "application/json", "x-goog-api-key": key }),
     body: (model, system, turns, maxTokens, tools) => ({
       systemInstruction: { parts: [{ text: system }] },
-      contents: flatTurns(turns, (turn) => ({ role: turn.role === "assistant" ? "model" : "user", parts: [{ text: turn.content }] })),
+      contents: flatTurns(turns, (turn) => ({ role: turn.role === "assistant" ? "model" : "user", parts: turn.role === "assistant" ? [{ text: turn.content }] : geminiParts(turn) })),
       generationConfig: { maxOutputTokens: maxTokens },
       ...(tools.length ? { tools: [{ functionDeclarations: tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: geminiSchema(tool.parameters) })) }] } : {})
     }),
@@ -306,19 +321,31 @@ function withTimeout(signal, ms) {
   return typeof AbortSignal.any === "function" ? AbortSignal.any([signal, timeout]) : signal;
 }
 
+function validImages(images) {
+  if (images === undefined) return true;
+  if (!Array.isArray(images) || images.length > MAX_IMAGES_PER_MESSAGE) return false;
+  return images.every((image) => IMAGE_TYPES.includes(image?.mime) && typeof image.data === "string" && image.data.length > 0);
+}
+
 // Validates the conversation and turns it into plain turns; only the latest attached context is sent.
 export function prepareTurns(messages) {
   if (!Array.isArray(messages) || !messages.length || messages.some((message) =>
-    !["user", "assistant"].includes(message.role) || typeof message.content !== "string" || !message.content.trim() ||
+    !["user", "assistant"].includes(message.role) || typeof message.content !== "string" ||
+    !message.content.trim() ||
+    (message.images !== undefined && (message.role !== "user" || !validImages(message.images))) ||
     (message.context !== undefined && (typeof message.context !== "string" || !message.context.trim() || message.context.length > MAX_CONTEXT_CHARS))
   ) || messages[messages.length - 1].role !== "user") {
     throw new Error("Não foi possível enviar a conversa: mensagens inválidas.");
   }
+  // Base64 is about 4/3 of the bytes; the cap covers every image the conversation resends.
+  const imageBytes = messages.reduce((sum, message) => sum + (message.images || []).reduce((total, image) => total + image.data.length * 0.75, 0), 0);
+  if (imageBytes > MAX_CONVERSATION_IMAGE_BYTES) throw new Error("As imagens da conversa passam do limite. Inicie uma nova conversa ou remova imagens.");
   const lastContext = messages.map((message) => Boolean(message.context)).lastIndexOf(true);
   // Only the most recent attached context is sent, so a switch left on does not stack copies of the data.
   return messages.map((message, index) => ({
     role: message.role,
-    content: apiContent(index === lastContext ? message : { ...message, context: "" })
+    content: apiContent(index === lastContext ? message : { ...message, context: "" }),
+    images: message.images || []
   }));
 }
 
@@ -326,6 +353,9 @@ async function requestAi(config, turns, { signal, maxTokens = MAX_OUTPUT_TOKENS,
   const provider = activeAi(config);
   if (!provider.apiKey) throw new Error(`Configure a chave do ${provider.label} em Configuração.`);
   if (!MODEL_ID.test(provider.model)) throw new Error(`Informe um ID de modelo válido para ${provider.label} em Configuração.`);
+  if (!provider.images && turns.some((turn) => turn.images?.length)) {
+    throw new Error(`O ${provider.label} não aceita imagens. Troque de provedor para enviar imagens.`);
+  }
   const adapter = ADAPTERS[provider.id];
   let response;
   try {

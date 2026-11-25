@@ -1,6 +1,7 @@
 import { escapeHtml } from "../models/format.js";
 import { PROVIDERS, PROVIDER_IDS, activeAi } from "../models/ai.js";
 import { buildContextTree, leavesOf, selectedContextText } from "../models/context-tree.js";
+import { MAX_IMAGES_PER_MESSAGE, formatSize } from "../models/chat-images.js";
 
 const GROUPED = { grouped: true };
 
@@ -68,7 +69,7 @@ export function renderChat(state) {
     return `<button type="button" class="chat-launcher" data-action="open-chat" aria-label="Abrir chat com a IA" aria-expanded="false">✦ <span>Chat IA</span></button>`;
   }
   const ai = activeAi(state.ai);
-  const messages = chat.messages.map((message) => `<div class="chat-message ${message.role === "user" ? "chat-user" : "chat-assistant"}"><strong>${message.role === "user" ? "Você" : escapeHtml(message.provider || "IA")}</strong><p>${escapeHtml(message.content)}</p>${message.context ? `<small class="chat-attach">Contexto anexado · ${message.context.length.toLocaleString("pt-BR")} caracteres</small>` : ""}</div>`).join("");
+  const messages = chat.messages.map((message) => `<div class="chat-message ${message.role === "user" ? "chat-user" : "chat-assistant"}"><strong>${message.role === "user" ? "Você" : escapeHtml(message.provider || "IA")}</strong><p>${escapeHtml(message.content)}</p>${message.images?.length ? `<small class="chat-attach">Imagens: ${message.images.map((image) => escapeHtml(image.name)).join(", ")}</small>` : ""}${message.context ? `<small class="chat-attach">Contexto anexado · ${message.context.length.toLocaleString("pt-BR")} caracteres</small>` : ""}</div>`).join("");
   const expandedContext = chat.useContext && !chat.contextCollapsed;
   const maxIcon = chat.maximized
     ? `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.5 5.5h8v8h-8zM2.5 10.5v-8h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`
@@ -95,8 +96,11 @@ export function renderChat(state) {
     <form class="chat-compose" data-action="send-chat">
       <label class="chat-switch"><input id="chat-context-toggle" type="checkbox" role="switch" data-action="chat-context-toggle" ${chat.useContext ? "checked" : ""} ${chat.sending ? "disabled" : ""}><span class="chat-switch-track" aria-hidden="true"></span><span>Anexar contexto (Bitbucket / Jira)</span></label>
       <label class="chat-label" for="chat-draft">Mensagem</label>
-      <textarea id="chat-draft" data-action="chat-draft" placeholder="Escreva sua mensagem" rows="2" required ${chat.sending ? "disabled" : ""}>${escapeHtml(chat.draft)}</textarea>
+      <textarea id="chat-draft" data-action="chat-draft" placeholder="Escreva sua mensagem" rows="2" ${chat.attachments.length ? "" : "required"} ${chat.sending ? "disabled" : ""}>${escapeHtml(chat.draft)}</textarea>
+      ${chat.attachments.length ? `<ul class="chat-attachments" aria-label="Imagens anexadas">${chat.attachments.map((image, index) => `<li class="chat-chip" title="${escapeHtml(image.name)} · ${formatSize(image.size)}"><span class="chat-chip-name">${escapeHtml(image.name)}</span><small>${formatSize(image.size)}</small><button type="button" class="chat-chip-remove" data-action="remove-chat-image" data-index="${index}" aria-label="Remover ${escapeHtml(image.name)}" ${chat.sending ? "disabled" : ""}>×</button></li>`).join("")}</ul>` : ""}
+      <input id="chat-image-input" data-action="chat-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden ${chat.sending ? "disabled" : ""}>
       <div class="chat-actions"><button type="button" class="ghost" data-action="clear-chat" ${chat.sending || !chat.messages.length ? "disabled" : ""}>Limpar conversa</button>
+        <button type="button" class="ghost chat-clip" data-action="attach-chat-image" aria-label="Anexar imagem" title="Anexar imagem (PNG, JPEG, WebP ou GIF até 5 MB)" ${chat.sending || chat.attachments.length >= MAX_IMAGES_PER_MESSAGE ? "disabled" : ""}><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4.5 5.6 9.4a1.6 1.6 0 0 0 2.3 2.3l4.6-4.6a3 3 0 0 0-4.3-4.3L3.6 7.6a4.4 4.4 0 0 0 6.2 6.2l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
         <button type="submit" class="primary" ${chat.sending || !ai.apiKey ? "disabled" : ""}>Enviar</button></div>
     </form>
   </section>`;

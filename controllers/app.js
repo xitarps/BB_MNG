@@ -2,7 +2,8 @@ import { destinationFor, normalizeWorkspace, validateConfig, clampInt, cleanToke
 import { explainError, createClient, slimPullRequest } from "../models/bitbucket.js";
 import { buildClonePlan } from "../models/clone-script.js";
 import { buildUpdatePlan } from "../models/update-script.js";
-import { MAX_CONTEXT_CHARS, MAX_INSTRUCTIONS, PROVIDER_IDS, PROVIDERS, defaultAiConfig, loadAiConfig, normalizeModel, saveAiConfig, testAiProvider } from "../models/ai.js";
+import { MAX_CONTEXT_CHARS, MAX_INSTRUCTIONS, PROVIDER_IDS, PROVIDERS, activeAi, defaultAiConfig, loadAiConfig, normalizeModel, saveAiConfig, testAiProvider } from "../models/ai.js";
+import { IMAGE_PROMPT, MAX_IMAGES_PER_MESSAGE, imageProblem, readImage } from "../models/chat-images.js";
 import { AgentRun } from "../models/chat-agent.js";
 import { JiraClient } from "../models/jira.js";
 import { showToast } from "../views/toast.js";
@@ -69,7 +70,7 @@ const state = {
   notice: "",
   abort: null,
   ai: aiConfig,
-  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(savedExclusions), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false, run: null, pending: null, activity: [] },
+  chat: { open: false, messages: [], draft: "", sending: false, error: "", truncated: false, useContext: false, contextData: null, contextExcluded: new Set(savedExclusions), treeOpen: new Set(), contextPreview: false, maximized: false, contextCollapsed: false, run: null, pending: null, activity: [], attachments: [] },
   ui: {
     prQuery: "",
     prAuthor: "",
@@ -398,13 +399,45 @@ function contextLeaves(path) {
   return node ? leavesOf(node) : [];
 }
 
+// Files are copied before the first await, so the caller can clear its file input right after calling.
+async function addChatImages(files) {
+  const chat = state.chat;
+  if (chat.sending) return;
+  const problems = [];
+  for (const file of [...files]) {
+    if (chat.attachments.length >= MAX_IMAGES_PER_MESSAGE) {
+      problems.push(`Limite de ${MAX_IMAGES_PER_MESSAGE} imagens por mensagem.`);
+      break;
+    }
+    const problem = imageProblem(file);
+    if (problem) {
+      problems.push(problem);
+      continue;
+    }
+    try {
+      chat.attachments.push(await readImage(file));
+    } catch (error) {
+      problems.push(error.message);
+    }
+  }
+  chat.error = problems.join(" ");
+  render({ keepScroll: true });
+}
+
 async function sendChat() {
   const chat = state.chat;
   if (chat.sending) return;
-  const text = chat.draft.trim();
+  const typed = chat.draft.trim();
+  const images = chat.attachments;
+  const text = typed || (images.length ? IMAGE_PROMPT : "");
   const context = chat.useContext ? chatContextText() : "";
   if (!text) {
     chat.error = "Escreva uma mensagem antes de enviar.";
+    render({ keepScroll: true });
+    return;
+  }
+  if (images.length && !activeAi(state.ai).images) {
+    chat.error = `${activeAi(state.ai).label} não aceita imagens. Troque de provedor para enviar imagens.`;
     render({ keepScroll: true });
     return;
   }
@@ -423,8 +456,12 @@ async function sendChat() {
     render({ keepScroll: true });
     return;
   }
-  chat.messages.push(context ? { role: "user", content: text, context } : { role: "user", content: text });
+  const message = { role: "user", content: text };
+  if (context) message.context = context;
+  if (images.length) message.images = images;
+  chat.messages.push(message);
   chat.draft = "";
+  chat.attachments = [];
   chat.error = "";
   chat.truncated = false;
   chat.pending = null;
@@ -437,10 +474,11 @@ async function sendChat() {
     chat.run = run;
     applyChatOutcome(await run.start());
   } catch (error) {
-    // Before the first model call succeeds nothing ran, so the message goes back to the draft; later failures keep it because Jira may already have changed.
+    // Before the first model call succeeds nothing ran, so the message and its images go back to the draft; later failures keep them because Jira may already have changed.
     if (!run || run.steps <= 1) {
       chat.messages.pop();
-      chat.draft = text;
+      chat.draft = typed;
+      chat.attachments = images;
     }
     chat.run = null;
     chat.error = error.message;
@@ -571,6 +609,12 @@ document.body.addEventListener("click", (event) => {
     download("contexto-bitbucket.json", JSON.stringify(data, null, 2), "json");
   } else if (action === "confirm-chat-action") {
     confirmChatAction(source.dataset.approved === "true");
+  } else if (action === "attach-chat-image") {
+    document.getElementById("chat-image-input")?.click();
+  } else if (action === "remove-chat-image") {
+    if (state.chat.sending) return;
+    state.chat.attachments.splice(Number(source.dataset.index), 1);
+    render({ keepScroll: true });
   } else if (action === "clear-chat") {
     if (state.chat.sending) return;
     state.chat.messages = [];
@@ -793,6 +837,11 @@ document.body.addEventListener("change", (event) => {
     render({ keepScroll: true });
     return;
   }
+  if (target.dataset.action === "chat-image-input") {
+    addChatImages(target.files);
+    target.value = "";
+    return;
+  }
   if (target.dataset.action === "chat-provider") {
     if (state.chat.sending || !PROVIDER_IDS.includes(target.value)) return;
     const config = { ...state.ai, provider: target.value };
@@ -880,6 +929,25 @@ document.body.addEventListener("keydown", (event) => {
   if (event.target.dataset?.action !== "chat-draft") return;
   event.preventDefault();
   event.target.form?.requestSubmit();
+});
+
+// Dropping files anywhere on the page would otherwise make the browser open them, so only the chat panel takes them.
+const hasFiles = (event) => Boolean(event.dataTransfer?.types?.includes("Files"));
+document.addEventListener("dragover", (event) => {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  const panel = document.querySelector(".chat-panel");
+  panel?.classList.toggle("is-dragover", Boolean(event.target.closest?.(".chat-panel")) && !state.chat.sending);
+});
+document.addEventListener("dragleave", (event) => {
+  if (!hasFiles(event) || event.relatedTarget?.closest?.(".chat-panel")) return;
+  document.querySelector(".chat-panel")?.classList.remove("is-dragover");
+});
+document.addEventListener("drop", (event) => {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  document.querySelector(".chat-panel")?.classList.remove("is-dragover");
+  if (event.target.closest?.(".chat-panel")) addChatImages(event.dataTransfer.files);
 });
 
 document.addEventListener("keydown", (event) => {

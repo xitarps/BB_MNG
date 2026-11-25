@@ -2,6 +2,7 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_CONTEXT_CHARS, MAX_INSTRUCTIONS, PROVIDERS, defaultAiConfig, loadAiConfig, normalizeModel, saveAiConfig, sendAiMessage, testAiProvider } from "../models/ai.js";
 import { renderChat } from "../views/chat.js";
+import { imageProblem } from "../models/chat-images.js";
 import { renderSettings } from "../views/settings.js";
 
 const originalFetch = globalThis.fetch;
@@ -257,7 +258,7 @@ test("standing instructions: saved with the config and sent in every provider's 
 });
 
 test("settings shows the instructions box and the chat flags when they are active", () => {
-  const chat = { open: true, messages: [], draft: "", error: "", sending: false, truncated: false, useContext: false, contextData: null, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false };
+  const chat = { open: true, messages: [], draft: "", error: "", sending: false, truncated: false, useContext: false, contextData: null, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false, attachments: [] };
   const state = { ai: { ...withKey("claude", "k"), instructions: 'Use <b>source_branch</b> & "aspas"' }, chat, config: { token: "" }, jiraConfig: { site: "", email: "", token: "", projects: "", scope: "open", maxIssues: 300, jql: "" }, user: null, userError: "", jiraUser: null };
   const settings = renderSettings(state);
   assert.match(settings, /<textarea name="instructions"[^>]*>Use &lt;b&gt;source_branch&lt;\/b&gt; &amp; &quot;aspas&quot;<\/textarea>/);
@@ -274,8 +275,51 @@ test("model ids are normalized and validated before use", async () => {
   await assert.rejects(sendAiMessage(withKey("deepseek"), [{ role: "user", content: "x", context: "a".repeat(MAX_CONTEXT_CHARS + 1) }]), /mensagens inválidas/);
 });
 
+test("images: vision providers get them before the question, each in its own format", async () => {
+  const photo = { name: "print.png", mime: "image/png", size: 10, data: "AAAA" };
+  const withImage = [{ role: "user", content: "O que vê?", images: [photo] }];
+  const claudeCalls = capture(ok({ content: [{ type: "text", text: "Vi" }], stop_reason: "end_turn" }));
+  await sendAiMessage(withKey("claude"), withImage);
+  assert.deepEqual(claudeCalls[0].body.messages[0].content, [
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+    { type: "text", text: "O que vê?" }
+  ]);
+  const openaiCalls = capture(ok({ output: [{ type: "message", content: [{ type: "output_text", text: "Vi" }] }] }));
+  await sendAiMessage(withKey("openai"), withImage);
+  assert.deepEqual(openaiCalls[0].body.input[0].content, [
+    { type: "input_text", text: "O que vê?" },
+    { type: "input_image", image_url: "data:image/png;base64,AAAA" }
+  ]);
+  const geminiCalls = capture(ok({ candidates: [{ content: { parts: [{ text: "Vi" }] }, finishReason: "STOP" }] }));
+  await sendAiMessage(withKey("gemini"), withImage);
+  assert.deepEqual(geminiCalls[0].body.contents[0].parts, [{ inline_data: { mime_type: "image/png", data: "AAAA" } }, { text: "O que vê?" }]);
+});
+
+test("images: DeepSeek refuses them and invalid files never reach a provider", async () => {
+  const photo = { name: "print.png", mime: "image/png", size: 10, data: "AAAA" };
+  const calls = capture(ok({}));
+  await assert.rejects(sendAiMessage(withKey("deepseek"), [{ role: "user", content: "x", images: [photo] }]), /DeepSeek não aceita imagens/);
+  await assert.rejects(sendAiMessage(withKey("claude"), [{ role: "user", content: "x", images: [{ ...photo, mime: "image/svg+xml" }] }]), /mensagens inválidas/);
+  await assert.rejects(sendAiMessage(withKey("claude"), [{ role: "user", content: "x", images: [photo, photo, photo, photo, photo] }]), /mensagens inválidas/);
+  assert.equal(calls.length, 0);
+});
+
+test("images: the conversation-wide image budget is enforced before sending", async () => {
+  const big = { name: "big.png", mime: "image/png", size: 0, data: "A".repeat(7_000_000) };
+  const calls = capture(ok({}));
+  const messages = [{ role: "user", content: "a", images: [big, big, big, big] }, { role: "assistant", content: "b" }, { role: "user", content: "c", images: [big] }];
+  await assert.rejects(sendAiMessage(withKey("claude"), messages), /passam do limite/);
+  assert.equal(calls.length, 0);
+});
+
+test("images: type and size are checked for each file", () => {
+  assert.equal(imageProblem({ name: "a.png", type: "image/png", size: 1000 }), null);
+  assert.match(imageProblem({ name: "a.svg", type: "image/svg+xml", size: 1000 }), /formato não aceito/);
+  assert.match(imageProblem({ name: "b.jpg", type: "image/jpeg", size: 6 * 1024 * 1024 }), /passa de 5 MB/);
+});
+
 test("chat header and settings let the user pick the provider", () => {
-  const chat = { open: true, messages: [{ role: "assistant", content: "oi", provider: "DeepSeek" }], draft: "", error: "", sending: false, truncated: false, useContext: false, contextData: null, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false, activity: [], pending: null };
+  const chat = { open: true, messages: [{ role: "assistant", content: "oi", provider: "DeepSeek" }], draft: "", error: "", sending: false, truncated: false, useContext: false, contextData: null, contextExcluded: new Set(), treeOpen: new Set(), contextPreview: false, activity: [], pending: null, attachments: [] };
   const state = { ai: withKey("gemini", "k"), chat, config: { token: "" }, jiraConfig: { site: "", email: "", token: "", projects: "", scope: "open", maxIssues: 300, jql: "" } };
   let html = renderChat(state);
   assert.match(html, /<select class="chat-provider" data-action="chat-provider"/);

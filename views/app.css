@@ -196,6 +196,13 @@ tr.selected td { background: #f3f8df; }
 .chat-confirm { margin: 6px 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid #d9a400; border-radius: 6px; background: #fffbea; font-size: 0.85rem; }
 .chat-confirm p { margin: 4px 0; }
 .chat-confirm ul, .chat-activity { margin: 4px 0; padding-left: 18px; font-size: 0.8rem; color: var(--muted); }
+.chat-panel.is-dragover { outline: 2px dashed var(--accent, #6b8afd); outline-offset: -6px; }
+.chat-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.chat-chip { display: flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 2px 4px 2px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 0.75rem; color: var(--muted); }
+.chat-chip-name { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+.chat-chip small { flex: none; }
+.chat-chip-remove { flex: none; border: 0; background: none; color: inherit; cursor: pointer; font-size: 0.9rem; line-height: 1; padding: 0 4px; }
+.chat-clip { display: inline-flex; align-items: center; padding: 6px 8px; }
 .chat-confirm .chat-actions { justify-content: flex-end; }
 .chat-compose { border-top: 1px solid var(--line); padding: 10px 14px 14px; }
 .chat-label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; }
